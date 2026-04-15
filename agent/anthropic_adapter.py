@@ -1337,7 +1337,7 @@ def build_anthropic_kwargs(
     # Only for native Anthropic endpoints — third-party providers would
     # reject the unknown beta header and speed parameter.
     if fast_mode and not _is_third_party_anthropic_endpoint(base_url):
-        kwargs["speed"] = "fast"
+        kwargs.setdefault("extra_body", {})["speed"] = "fast"
         # Build extra_headers with ALL applicable betas (the per-request
         # extra_headers override the client-level anthropic-beta header).
         betas = list(_common_betas_for_base_url(base_url))
