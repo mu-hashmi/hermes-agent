@@ -5542,6 +5542,12 @@ class HermesCLI:
                 self._reload_mcp()
         elif canonical == "browser":
             self._handle_browser_command(cmd_original)
+        elif canonical == "plannotator-annotate":
+            self._handle_plannotator_annotate(cmd_original)
+        elif canonical == "plannotator-last":
+            self._handle_plannotator_last(cmd_original)
+        elif canonical == "plannotator-review":
+            self._handle_plannotator_review(cmd_original)
         elif canonical == "plugins":
             try:
                 from hermes_cli.plugins import get_plugin_manager
@@ -5719,6 +5725,204 @@ class HermesCLI:
             self._pending_input.put(msg)
         else:
             ChatConsole().print("[bold red]Plan mode unavailable: input queue not initialized[/]")
+
+    # ---- Plannotator integration ------------------------------------------
+    # Plannotator (https://plannotator.ai) opens a browser-based annotation UI,
+    # blocks until the user submits, then prints structured markdown feedback
+    # to stdout. We capture that stdout and inject it as a user message so the
+    # same agent revises based on the user's annotations — no copy-paste.
+    #
+    # Three entry points:
+    #   /plannotator-annotate <file|url|folder>  → annotate any markdown/HTML
+    #   /plannotator-last                        → annotate the agent's last msg
+    #   /plannotator-review [PR_URL]             → review current diff or a PR
+
+    def _plannotator_binary(self) -> Optional[str]:
+        """Locate the plannotator CLI. Installed by the official installer to
+        ~/.local/bin/plannotator, but fall back to PATH lookup for completeness.
+        """
+        import shutil
+
+        local_bin = Path.home() / ".local" / "bin" / "plannotator"
+        if local_bin.exists() and os.access(local_bin, os.X_OK):
+            return str(local_bin)
+        return shutil.which("plannotator")
+
+    def _run_plannotator(self, args: list[str], label: str) -> Optional[str]:
+        """Shell out to plannotator with the given args. Block until the user
+        submits in the browser. Return stdout (the feedback payload) on success,
+        or None if plannotator exited without feedback.
+
+        Inherits stdin/stderr so the user sees plannotator's progress messages
+        (server URL, browser opening, etc.) inline. Only stdout is captured —
+        that's the structured feedback we inject back into the session.
+        """
+        import subprocess
+
+        binary = self._plannotator_binary()
+        if not binary:
+            _cprint("  ⚠ plannotator not found. Install it with:")
+            _cprint("    curl -fsSL https://plannotator.ai/install.sh | bash")
+            return None
+
+        _cprint(f"  🖊  {label} — waiting for you to submit in the browser...")
+        _cprint(f"     (Ctrl+C here to cancel without sending feedback)")
+
+        try:
+            result = subprocess.run(
+                [binary, *args],
+                stdout=subprocess.PIPE,
+                stderr=None,       # let plannotator print its own status to our stderr
+                stdin=None,        # inherit stdin so any prompts work
+                text=True,
+            )
+        except KeyboardInterrupt:
+            _cprint("  Cancelled. No feedback sent.")
+            return None
+        except Exception as e:
+            _cprint(f"  ⚠ plannotator failed to launch: {e}")
+            return None
+
+        if result.returncode != 0:
+            _cprint(f"  ⚠ plannotator exited with status {result.returncode}. No feedback sent.")
+            return None
+
+        feedback = (result.stdout or "").strip()
+        if not feedback:
+            _cprint("  (no feedback returned — session closed without sending annotations)")
+            return None
+
+        return feedback
+
+    def _inject_plannotator_feedback(self, feedback: str, context_line: str) -> None:
+        """Build the user message that carries the plannotator feedback back to
+        the same agent and queue it for the next turn.
+        """
+        msg = (
+            f"{context_line}\n\n"
+            "The user reviewed this and returned the following annotations via "
+            "Plannotator. Address each piece of feedback directly — apply the "
+            "requested edits, answer any comments, and revise your approach as "
+            "needed. Do not repeat the annotations verbatim back to the user.\n\n"
+            "--- Plannotator feedback ---\n"
+            f"{feedback}\n"
+            "--- end feedback ---"
+        )
+
+        if not hasattr(self, "_pending_input"):
+            ChatConsole().print("[bold red]Cannot inject feedback: input queue not initialized[/]")
+            return
+
+        self._pending_input.put(msg)
+        preview = feedback.splitlines()[0][:80] if feedback else ""
+        _cprint(f"  ✓ Feedback queued for the agent ({len(feedback)} chars). Preview: {preview}")
+
+    def _handle_plannotator_annotate(self, cmd: str) -> None:
+        """Handle /plannotator-annotate <file|url|folder>.
+
+        Shells out to `plannotator annotate <arg>` and injects the returned
+        feedback into the session. The plannotator CLI supports .md/.mdx/.html
+        files, URLs (via Jina Reader by default), and directory file-pickers.
+        """
+        parts = cmd.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            _cprint("  Usage: /plannotator-annotate <file.md | file.html | https://... | folder/>")
+            _cprint("  Example: /plannotator-annotate plans/refactor-auth.md")
+            return
+
+        target = parts[1].strip()
+        with self._busy_command(f"Plannotator: annotating {target}..."):
+            feedback = self._run_plannotator(["annotate", target], f"Annotating {target}")
+
+        if feedback:
+            self._inject_plannotator_feedback(
+                feedback,
+                f"I ran Plannotator to annotate `{target}`.",
+            )
+
+    def _handle_plannotator_last(self, cmd: str) -> None:
+        """Handle /plannotator-last — annotate the agent's last assistant message.
+
+        Walks backwards through conversation_history to find the most recent
+        assistant message with text content, writes it to a temp markdown file,
+        and runs `plannotator annotate` on that file. The returned feedback is
+        injected back into the session so the agent can revise its own proposal.
+        """
+        if not self.conversation_history:
+            _cprint("  No conversation yet — ask the agent something first.")
+            return
+
+        last_assistant = None
+        for msg in reversed(self.conversation_history):
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                last_assistant = content
+                break
+            # Some providers return list-of-blocks — pull text out
+            if isinstance(content, list):
+                text_parts = [
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                joined = "\n".join(t for t in text_parts if t).strip()
+                if joined:
+                    last_assistant = joined
+                    break
+
+        if not last_assistant:
+            _cprint("  No recent assistant message with text to annotate.")
+            return
+
+        # Write to a file under the user's plannotator dir so archives are
+        # co-located with other plannotator sessions.
+        plans_dir = Path.home() / ".plannotator" / "plans"
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        tmp_path = plans_dir / f"hermes-last-{ts}.md"
+        tmp_path.write_text(last_assistant, encoding="utf-8")
+
+        with self._busy_command("Plannotator: annotating last message..."):
+            feedback = self._run_plannotator(
+                ["annotate", str(tmp_path), "--no-jina"],
+                "Annotating last message",
+            )
+
+        if feedback:
+            self._inject_plannotator_feedback(
+                feedback,
+                "I ran Plannotator to annotate your last message.",
+            )
+
+    def _handle_plannotator_review(self, cmd: str) -> None:
+        """Handle /plannotator-review [PR_URL] — review current git diff or a PR.
+
+        With no argument, plannotator reviews the current working-tree diff.
+        With a GitHub PR URL, it fetches that PR's diff. Inline review comments
+        come back as structured feedback the agent can act on.
+        """
+        parts = cmd.strip().split(maxsplit=1)
+        pr_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        args = ["review"]
+        label = "Reviewing git diff"
+        if pr_arg:
+            args.append(pr_arg)
+            label = f"Reviewing {pr_arg}"
+
+        with self._busy_command(f"Plannotator: {label.lower()}..."):
+            feedback = self._run_plannotator(args, label)
+
+        if feedback:
+            context = (
+                f"I ran Plannotator to review `{pr_arg}`."
+                if pr_arg
+                else "I ran Plannotator to review the current git diff."
+            )
+            self._inject_plannotator_feedback(feedback, context)
+
     
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.

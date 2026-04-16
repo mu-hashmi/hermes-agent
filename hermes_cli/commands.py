@@ -140,6 +140,12 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("browser", "Connect browser tools to your live Chrome via CDP", "Tools & Skills",
                cli_only=True, args_hint="[connect|disconnect|status]",
                subcommands=("connect", "disconnect", "status")),
+    CommandDef("plannotator-annotate", "Annotate a markdown/HTML file or URL in the browser (plannotator)",
+               "Tools & Skills", cli_only=True, args_hint="<file|url|folder>"),
+    CommandDef("plannotator-last", "Annotate the agent's last message in the browser (plannotator)",
+               "Tools & Skills", cli_only=True),
+    CommandDef("plannotator-review", "Review current git diff or a PR URL in the browser (plannotator)",
+               "Tools & Skills", cli_only=True, args_hint="[PR_URL]"),
     CommandDef("plugins", "List installed plugins and their status",
                "Tools & Skills", cli_only=True),
 
