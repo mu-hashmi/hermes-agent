@@ -78,11 +78,68 @@ import math
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# MCP stdio stderr redirection
+# ---------------------------------------------------------------------------
+# The MCP SDK's stdio_client() defaults errlog=sys.stderr, which on the CLI
+# is a live TTY fd.  Node/Puppeteer-based MCPs (chrome-devtools-mcp) detect
+# isTTY=true on that fd and probe the terminal with ESC[6n cursor-position
+# queries, color capability queries, and (during crashes) raw-mode escape
+# sequences.  Those bytes bypass prompt_toolkit's patch_stdout because the
+# child writes to the TTY directly.  The terminal's replies (e.g. ^[49;1R)
+# poison prompt_toolkit's stdin, which manifests as a "frozen" shell where
+# typing, Ctrl+C, and Enter all appear dead -- the only fix is closing the
+# tab to reset the terminal.
+#
+# Redirecting each MCP server's stderr to its own log file under
+# ~/.hermes/logs/mcp/<name>.stderr.log fixes this and also gives us real
+# server-side error logs for debugging MCP crashes.
+# ---------------------------------------------------------------------------
+
+# Cache of open stderr log file handles, keyed by server name.  Files are
+# opened lazily on first _run_stdio() and kept open for the lifetime of the
+# process (OS closes them on exit).  This avoids churning file handles on
+# every MCP reload cycle.
+_mcp_stderr_logs: Dict[str, Any] = {}
+_mcp_stderr_lock = threading.Lock()
+
+
+def _get_mcp_stderr_log(server_name: str):
+    """Return an open append-mode file handle for this server's stderr log.
+
+    Falls back to sys.stderr if the log directory cannot be created (e.g.
+    read-only FS).  Returns the SAME handle on subsequent calls for the same
+    server name, so repeated MCP reloads append to the same file instead of
+    leaking fds.
+    """
+    with _mcp_stderr_lock:
+        existing = _mcp_stderr_logs.get(server_name)
+        if existing is not None and not existing.closed:
+            return existing
+        try:
+            from hermes_constants import get_hermes_home
+            log_dir = get_hermes_home() / "logs" / "mcp"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            # Sanitize name for filesystem -- strip path separators and NULs.
+            safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", server_name)
+            log_path = log_dir / f"{safe_name}.stderr.log"
+            fh = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
+            _mcp_stderr_logs[server_name] = fh
+            return fh
+        except Exception as exc:
+            logger.debug(
+                "Could not open MCP stderr log for '%s' (%s); falling back to sys.stderr",
+                server_name, exc,
+            )
+            return sys.stderr
 
 # ---------------------------------------------------------------------------
 # Graceful import -- MCP SDK is an optional dependency
@@ -921,7 +978,10 @@ class MCPServerTask:
 
         # Snapshot child PIDs before spawning so we can track the new one.
         pids_before = _snapshot_child_pids()
-        async with stdio_client(server_params) as (read_stream, write_stream):
+        # Redirect child stderr to a per-server log file to avoid TTY poisoning.
+        # Node/Puppeteer-based servers otherwise probe the terminal and leave
+        # prompt_toolkit's stdin in a broken state.  See _get_mcp_stderr_log().
+        async with stdio_client(server_params, errlog=_get_mcp_stderr_log(self.name)) as (read_stream, write_stream):
             # Capture the newly spawned subprocess PID for force-kill cleanup.
             new_pids = _snapshot_child_pids() - pids_before
             if new_pids:

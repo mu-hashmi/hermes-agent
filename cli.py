@@ -9667,19 +9667,9 @@ class HermesCLI:
                         user_input = expanded
                     else:
                         _user_bar = f"[{_accent_hex()}]{'─' * 40}[/]"
-                        if '\n' in user_input:
-                            first_line = user_input.split('\n')[0]
-                            line_count = user_input.count('\n') + 1
-                            print()
-                            ChatConsole().print(_user_bar)
-                            ChatConsole().print(
-                                f"[bold {_accent_hex()}]●[/] [bold]{_escape(first_line)}[/] "
-                                f"[dim](+{line_count - 1} lines)[/]"
-                            )
-                        else:
-                            print()
-                            ChatConsole().print(_user_bar)
-                            ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]")
+                        print()
+                        ChatConsole().print(_user_bar)
+                        ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]")
                     
                     # Show image attachment count
                     if submit_images:
