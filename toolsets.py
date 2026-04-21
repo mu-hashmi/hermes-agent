@@ -60,6 +60,8 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # macOS screenshots (gated to Darwin via check_fn)
+    "screen_list", "screenshot_display", "screenshot_window",
 ]
 
 
@@ -125,7 +127,13 @@ TOOLSETS = {
         "tools": ["cronjob"],
         "includes": []
     },
-    
+
+    "screenshot": {
+        "description": "macOS screenshots — capture specific windows or full displays, enumerate open windows. Use when the user wants the agent to see what's currently on their screen.",
+        "tools": ["screen_list", "screenshot_display", "screenshot_window"],
+        "includes": []
+    },
+
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
         "tools": ["send_message"],
