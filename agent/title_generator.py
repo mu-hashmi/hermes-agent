@@ -100,6 +100,9 @@ def auto_title_session(
     - session_db is None
     - session already has a title (user-set or previously auto-generated)
     - title generation fails
+
+    If ``on_success`` is provided, it's called with the new title after the
+    database write succeeds.  Used by the CLI to refresh the terminal tab title.
     """
     if not session_db or not session_id:
         return
