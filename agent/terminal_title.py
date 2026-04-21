@@ -31,9 +31,15 @@ _DEFAULT_TITLE = "Hermes"
 
 
 def _is_capable_tty() -> bool:
-    """True when stdout is an interactive terminal that likely handles OSC 2."""
+    """True when the controlling terminal likely handles OSC 0/2.
+
+    Checks ``sys.__stdout__`` (not ``sys.stdout``) because prompt_toolkit's
+    ``patch_stdout`` replaces ``sys.stdout`` with a proxy whose ``isatty``
+    returns False even when the real terminal is interactive.
+    """
     try:
-        if not sys.stdout.isatty():
+        real = sys.__stdout__
+        if real is None or not real.isatty():
             return False
     except Exception:
         return False
@@ -64,6 +70,11 @@ def set_tab_title(text: Optional[str]) -> None:
     is used instead of ST because a stray ``\\x1b\\`` can be rendered as
     literal text on some terminals when pasted by an outer application.
 
+    Writes directly to ``/dev/tty`` so the escape sequence bypasses
+    prompt_toolkit's ``patch_stdout`` StdoutProxy (which swallows raw OSC
+    codes when the CLI is running).  Falls back to ``sys.__stdout__`` if
+    ``/dev/tty`` is unavailable.
+
     No-op in non-TTY contexts or if ``text`` is empty after sanitization.
     """
     if not _is_capable_tty():
@@ -71,9 +82,24 @@ def set_tab_title(text: Optional[str]) -> None:
     cleaned = _sanitize(text or "")
     if not cleaned:
         cleaned = _DEFAULT_TITLE
+    payload = f"\x1b]0;{cleaned}\x07"
+
+    # /dev/tty is the controlling terminal of the process, not affected by
+    # any stdout redirection or prompt_toolkit's patch_stdout proxy.
     try:
-        sys.stdout.write(f"\x1b]0;{cleaned}\x07")
-        sys.stdout.flush()
+        with open("/dev/tty", "w") as tty:
+            tty.write(payload)
+            tty.flush()
+        return
+    except (OSError, IOError):
+        pass
+
+    # Fallback: write to the real underlying stdout (bypasses patch_stdout).
+    try:
+        real_stdout = sys.__stdout__
+        if real_stdout is not None:
+            real_stdout.write(payload)
+            real_stdout.flush()
     except Exception:
         # Never let a terminal write break the CLI.
         pass
