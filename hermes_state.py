@@ -730,14 +730,25 @@ class SessionDB:
 
         Uses a single query with correlated subqueries instead of N+2 queries.
 
-        By default, child sessions (subagent runs, compression continuations)
-        are excluded.  Pass ``include_children=True`` to include them.
+        By default, unnamed child sessions (subagent runs from delegate_task)
+        are excluded.  Child sessions that have a title — branched sessions
+        and compression continuations the user has worked in — are kept
+        because they represent real work the user will want to return to.
+        Pass ``include_children=True`` to include ALL children, including
+        unnamed subagent runs.
         """
         where_clauses = []
         params = []
 
         if not include_children:
-            where_clauses.append("s.parent_session_id IS NULL")
+            # Exclude only UNNAMED children.  Branched sessions and
+            # compression continuations get titles (explicit or
+            # auto-generated) and should remain visible; subagent runs
+            # from delegate_task never get a title.
+            where_clauses.append(
+                "(s.parent_session_id IS NULL "
+                "OR (s.title IS NOT NULL AND s.title != ''))"
+            )
 
         if source:
             where_clauses.append("s.source = ?")
