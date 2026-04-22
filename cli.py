@@ -15,6 +15,7 @@ Usage:
 
 import logging
 import os
+import re
 import shutil
 import sys
 import json
@@ -1062,6 +1063,38 @@ def _rich_text_from_ansi(text: str) -> _RichText:
     return _RichText.from_ansi(text or "")
 
 
+# Regex covering the markdown constructs we want to trigger post-stream
+# rendering for: headings, code fences, tables, bullet/numbered lists, or
+# inline emphasis that would otherwise show raw markers. Plain prose responses
+# skip the rendered-panel pass to avoid duplicating every message.
+_MARKDOWN_INDICATORS = re.compile(
+    r"""
+    ^\#{1,3}\s           |   # headings at start of a line
+    ^\s*[-*+]\s           |   # bullet list items
+    ^\s*\d+\.\s           |   # numbered list items
+    ^\s*>\s               |   # blockquotes
+    ```                    |   # fenced code blocks
+    ^\s*\|.*\|\s*$         |   # table rows
+    \*\*[^*]+\*\*         |   # bold **word**
+    (?<!\*)\*[^*\s][^*]*\*(?!\*)  # italic *word*  (not part of **bold**)
+    """,
+    re.MULTILINE | re.VERBOSE,
+)
+
+
+def _response_looks_markdown(text: str) -> bool:
+    """True when *text* appears to contain markdown worth re-rendering.
+
+    Plain prose responses ("hey, not much — what's up?") skip the rendered
+    panel to avoid duplicating every turn.  Anything with headings, code
+    fences, tables, lists, blockquotes, bold, or italics gets the rendered
+    treatment.
+    """
+    if not text or len(text) < 20:
+        return False
+    return bool(_MARKDOWN_INDICATORS.search(text))
+
+
 def _cprint(text: str):
     """Print ANSI-colored text through prompt_toolkit's native renderer.
 
@@ -1633,6 +1666,14 @@ class HermesCLI:
         
         # streaming: stream tokens to the terminal as they arrive (display.streaming in config.yaml)
         self.streaming_enabled = CLI_CONFIG["display"].get("streaming", False)
+
+        # markdown_render: after a streamed response completes, re-render the
+        # full response through rich.markdown.Markdown so tables, code blocks,
+        # bold/italic, and lists display properly. The raw streamed tokens stay
+        # visible (no flicker, no waiting) — the rendered version is appended
+        # below, giving the user both the live feedback AND a clean formatted
+        # final view.
+        self.markdown_render = CLI_CONFIG["display"].get("markdown_render", True)
 
         # Inline diff previews for write actions (display.inline_diffs in config.yaml)
         self._inline_diffs_enabled = CLI_CONFIG["display"].get("inline_diffs", True)
@@ -8200,19 +8241,57 @@ class HermesCLI:
                     _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
                 elif already_streamed:
                     # Response was already streamed token-by-token with box framing;
-                    # _flush_stream() already closed the box. Skip Rich Panel.
-                    pass
+                    # _flush_stream() already closed the box. If markdown_render is
+                    # enabled, follow up with a clean rendered panel so tables,
+                    # code blocks, bold, and lists display properly. The streamed
+                    # box above stays visible — no flicker, no re-stream.
+                    if self.markdown_render and _response_looks_markdown(response):
+                        try:
+                            from rich.markdown import Markdown as _RichMarkdown
+                            ChatConsole().print(Panel(
+                                _RichMarkdown(response, code_theme="monokai"),
+                                title=f"[{_resp_color} bold]{label} · rendered[/]",
+                                title_align="left",
+                                border_style=_resp_color,
+                                box=rich_box.HORIZONTALS,
+                                padding=(1, 4),
+                            ))
+                        except Exception:
+                            pass  # Never let rendering break the session
                 else:
                     _chat_console = ChatConsole()
-                    _chat_console.print(Panel(
-                        _rich_text_from_ansi(response),
-                        title=f"[{_resp_color} bold]{label}[/]",
-                        title_align="left",
-                        border_style=_resp_color,
-                        style=_resp_text,
-                        box=rich_box.HORIZONTALS,
-                        padding=(1, 4),
-                    ))
+                    if self.markdown_render and _response_looks_markdown(response):
+                        try:
+                            from rich.markdown import Markdown as _RichMarkdown
+                            _chat_console.print(Panel(
+                                _RichMarkdown(response, code_theme="monokai"),
+                                title=f"[{_resp_color} bold]{label}[/]",
+                                title_align="left",
+                                border_style=_resp_color,
+                                box=rich_box.HORIZONTALS,
+                                padding=(1, 4),
+                            ))
+                        except Exception:
+                            # Fallback to ANSI rendering if markdown parse fails
+                            _chat_console.print(Panel(
+                                _rich_text_from_ansi(response),
+                                title=f"[{_resp_color} bold]{label}[/]",
+                                title_align="left",
+                                border_style=_resp_color,
+                                style=_resp_text,
+                                box=rich_box.HORIZONTALS,
+                                padding=(1, 4),
+                            ))
+                    else:
+                        _chat_console.print(Panel(
+                            _rich_text_from_ansi(response),
+                            title=f"[{_resp_color} bold]{label}[/]",
+                            title_align="left",
+                            border_style=_resp_color,
+                            style=_resp_text,
+                            box=rich_box.HORIZONTALS,
+                            padding=(1, 4),
+                        ))
 
 
             # Play terminal bell when agent finishes (if enabled).
