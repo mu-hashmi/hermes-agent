@@ -104,42 +104,43 @@ logger = logging.getLogger(__name__)
 # server-side error logs for debugging MCP crashes.
 # ---------------------------------------------------------------------------
 
-# Cache of open stderr log file handles, keyed by server name.  Files are
-# opened lazily on first _run_stdio() and kept open for the lifetime of the
-# process (OS closes them on exit).  This avoids churning file handles on
-# every MCP reload cycle.
-_mcp_stderr_logs: Dict[str, Any] = {}
-_mcp_stderr_lock = threading.Lock()
+# Files are opened fresh on every _run_stdio() and closed when the stdio_client
+# subprocess exits (Python closes the wrapping file object when its refcount
+# drops after stdio_client's __aexit__ tears down the spawn).
+#
+# Previously these handles were cached in a dict keyed by server name to avoid
+# churning file descriptors across MCP reloads.  The cache was unsafe: on
+# /reload-mcp, the old handle stays in the dict, but its underlying fd has been
+# invalidated by the child-process teardown that happens inside
+# stdio_client.__aexit__.  When the new spawn pulls the cached handle, passing
+# it as errlog= silently falls back to inheriting the parent's TTY — at which
+# point every llama-index / chroma / tqdm stderr byte pours into the user's
+# interactive shell.  One open handle per child process is negligible
+# overhead and avoids the whole race.
 
 
 def _get_mcp_stderr_log(server_name: str):
-    """Return an open append-mode file handle for this server's stderr log.
+    """Return a fresh open append-mode file handle for this server's stderr log.
 
     Falls back to sys.stderr if the log directory cannot be created (e.g.
-    read-only FS).  Returns the SAME handle on subsequent calls for the same
-    server name, so repeated MCP reloads append to the same file instead of
-    leaking fds.
+    read-only FS).  A new handle is opened on every call; the caller owns the
+    fd and is responsible for closing it (stdio_client does this implicitly
+    when its context exits).
     """
-    with _mcp_stderr_lock:
-        existing = _mcp_stderr_logs.get(server_name)
-        if existing is not None and not existing.closed:
-            return existing
-        try:
-            from hermes_constants import get_hermes_home
-            log_dir = get_hermes_home() / "logs" / "mcp"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            # Sanitize name for filesystem -- strip path separators and NULs.
-            safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", server_name)
-            log_path = log_dir / f"{safe_name}.stderr.log"
-            fh = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
-            _mcp_stderr_logs[server_name] = fh
-            return fh
-        except Exception as exc:
-            logger.debug(
-                "Could not open MCP stderr log for '%s' (%s); falling back to sys.stderr",
-                server_name, exc,
-            )
-            return sys.stderr
+    try:
+        from hermes_constants import get_hermes_home
+        log_dir = get_hermes_home() / "logs" / "mcp"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        # Sanitize name for filesystem -- strip path separators and NULs.
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", server_name)
+        log_path = log_dir / f"{safe_name}.stderr.log"
+        return open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
+    except Exception as exc:
+        logger.debug(
+            "Could not open MCP stderr log for '%s' (%s); falling back to sys.stderr",
+            server_name, exc,
+        )
+        return sys.stderr
 
 # ---------------------------------------------------------------------------
 # Graceful import -- MCP SDK is an optional dependency
