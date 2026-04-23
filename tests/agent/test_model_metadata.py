@@ -20,15 +20,13 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from agent.model_metadata import (
-    CONTEXT_PROBE_TIERS,
     DEFAULT_CONTEXT_LENGTHS,
+    DEFAULT_FALLBACK_CONTEXT,
     _strip_provider_prefix,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
     get_model_context_length,
-    get_next_probe_tier,
     get_cached_context_length,
-    parse_context_limit_from_error,
     save_context_length,
     fetch_model_metadata,
     _MODEL_CACHE_TTL,
@@ -216,9 +214,9 @@ class TestGetModelContextLength:
         assert get_model_context_length("anthropic/claude-sonnet-4") == 200000
 
     @patch("agent.model_metadata.fetch_model_metadata")
-    def test_unknown_model_returns_first_probe_tier(self, mock_fetch):
+    def test_unknown_model_returns_fallback_context(self, mock_fetch):
         mock_fetch.return_value = {}
-        assert get_model_context_length("unknown/never-heard-of-this") == CONTEXT_PROBE_TIERS[0]
+        assert get_model_context_length("unknown/never-heard-of-this") == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_partial_match_in_defaults(self, mock_fetch):
@@ -266,9 +264,9 @@ class TestGetModelContextLength:
         cache_file = tmp_path / "cache.yaml"
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length("custom/model", "http://local", 32768)
-            # No base_url → cache skipped → falls to probe tier
+            # No base_url → cache skipped → falls to fallback context
             result = get_model_context_length("custom/model")
-            assert result == CONTEXT_PROBE_TIERS[0]
+            assert result == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
@@ -298,7 +296,7 @@ class TestGetModelContextLength:
             api_key="test-key",
         )
 
-        assert result == CONTEXT_PROBE_TIERS[0]
+        assert result == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
@@ -537,97 +535,6 @@ class TestFetchModelMetadata:
 
         result = fetch_model_metadata(force_refresh=True)
         assert result == {}
-
-
-# =========================================================================
-# Context probe tiers
-# =========================================================================
-
-class TestContextProbeTiers:
-    def test_tiers_descending(self):
-        for i in range(len(CONTEXT_PROBE_TIERS) - 1):
-            assert CONTEXT_PROBE_TIERS[i] > CONTEXT_PROBE_TIERS[i + 1]
-
-    def test_first_tier_is_128k(self):
-        assert CONTEXT_PROBE_TIERS[0] == 128_000
-
-    def test_last_tier_is_8k(self):
-        assert CONTEXT_PROBE_TIERS[-1] == 8_000
-
-
-class TestGetNextProbeTier:
-    def test_from_128k(self):
-        assert get_next_probe_tier(128_000) == 64_000
-
-    def test_from_64k(self):
-        assert get_next_probe_tier(64_000) == 32_000
-
-    def test_from_32k(self):
-        assert get_next_probe_tier(32_000) == 16_000
-
-    def test_from_8k_returns_none(self):
-        assert get_next_probe_tier(8_000) is None
-
-    def test_from_below_min_returns_none(self):
-        assert get_next_probe_tier(4_000) is None
-
-    def test_from_arbitrary_value(self):
-        assert get_next_probe_tier(100_000) == 64_000
-
-    def test_above_max_tier(self):
-        """Value above 128K should return 128K."""
-        assert get_next_probe_tier(500_000) == 128_000
-
-    def test_zero_returns_none(self):
-        assert get_next_probe_tier(0) is None
-
-
-# =========================================================================
-# Error message parsing
-# =========================================================================
-
-class TestParseContextLimitFromError:
-    def test_openai_format(self):
-        msg = "This model's maximum context length is 32768 tokens. However, your messages resulted in 45000 tokens."
-        assert parse_context_limit_from_error(msg) == 32768
-
-    def test_context_length_exceeded(self):
-        msg = "context_length_exceeded: maximum context length is 131072"
-        assert parse_context_limit_from_error(msg) == 131072
-
-    def test_context_size_exceeded(self):
-        msg = "Maximum context size 65536 exceeded"
-        assert parse_context_limit_from_error(msg) == 65536
-
-    def test_no_limit_in_message(self):
-        assert parse_context_limit_from_error("Something went wrong with the API") is None
-
-    def test_unreasonable_small_number_rejected(self):
-        assert parse_context_limit_from_error("context length is 42 tokens") is None
-
-    def test_ollama_format(self):
-        msg = "Context size has been exceeded. Maximum context size is 32768"
-        assert parse_context_limit_from_error(msg) == 32768
-
-    def test_anthropic_format(self):
-        msg = "prompt is too long: 250000 tokens > 200000 maximum"
-        # Should extract 200000 (the limit), not 250000 (the input size)
-        assert parse_context_limit_from_error(msg) == 200000
-
-    def test_lmstudio_format(self):
-        msg = "Error: context window of 4096 tokens exceeded"
-        assert parse_context_limit_from_error(msg) == 4096
-
-    def test_completely_unrelated_error(self):
-        assert parse_context_limit_from_error("Invalid API key") is None
-
-    def test_empty_string(self):
-        assert parse_context_limit_from_error("") is None
-
-    def test_number_outside_reasonable_range(self):
-        """Very large number (>10M) should be rejected."""
-        msg = "maximum context length is 99999999999"
-        assert parse_context_limit_from_error(msg) is None
 
 
 # =========================================================================

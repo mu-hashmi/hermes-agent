@@ -73,19 +73,12 @@ _endpoint_model_metadata_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _endpoint_model_metadata_cache_time: Dict[str, float] = {}
 _ENDPOINT_MODEL_CACHE_TTL = 300
 
-# Descending tiers for context length probing when the model is unknown.
-# We start at 128K (a safe default for most modern models) and step down
-# on context-length errors until one works.
-CONTEXT_PROBE_TIERS = [
-    128_000,
-    64_000,
-    32_000,
-    16_000,
-    8_000,
-]
-
-# Default context length when no detection method succeeds.
-DEFAULT_FALLBACK_CONTEXT = CONTEXT_PROBE_TIERS[0]
+# Default context length when no detection method succeeds.  Deliberately
+# conservative — 128K is a reasonable lower-bound for anything modern
+# enough to be worth running, and avoids overclaiming capabilities of
+# unknown models.  The gateway uses this to warn the user when it's
+# hitting this fallback (likely a misconfigured local model).
+DEFAULT_FALLBACK_CONTEXT = 128_000
 
 # Minimum context length required to run Hermes Agent.  Models with fewer
 # tokens cannot maintain enough working memory for tool-calling workflows.
@@ -610,42 +603,6 @@ def get_cached_context_length(model: str, base_url: str) -> Optional[int]:
     key = f"{model}@{base_url}"
     cache = _load_context_cache()
     return cache.get(key)
-
-
-def get_next_probe_tier(current_length: int) -> Optional[int]:
-    """Return the next lower probe tier, or None if already at minimum."""
-    for tier in CONTEXT_PROBE_TIERS:
-        if tier < current_length:
-            return tier
-    return None
-
-
-def parse_context_limit_from_error(error_msg: str) -> Optional[int]:
-    """Try to extract the actual context limit from an API error message.
-
-    Many providers include the limit in their error text, e.g.:
-      - "maximum context length is 32768 tokens"
-      - "context_length_exceeded: 131072"
-      - "Maximum context size 32768 exceeded"
-      - "model's max context length is 65536"
-    """
-    error_lower = error_msg.lower()
-    # Pattern: look for numbers near context-related keywords
-    patterns = [
-        r'(?:max(?:imum)?|limit)\s*(?:context\s*)?(?:length|size|window)?\s*(?:is|of|:)?\s*(\d{4,})',
-        r'context\s*(?:length|size|window)\s*(?:is|of|:)?\s*(\d{4,})',
-        r'(\d{4,})\s*(?:token)?\s*(?:context|limit)',
-        r'>\s*(\d{4,})\s*(?:max|limit|token)',  # "250000 tokens > 200000 maximum"
-        r'(\d{4,})\s*(?:max(?:imum)?)\b',  # "200000 maximum"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, error_lower)
-        if match:
-            limit = int(match.group(1))
-            # Sanity check: must be a reasonable context length
-            if 1024 <= limit <= 10_000_000:
-                return limit
-    return None
 
 
 def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:

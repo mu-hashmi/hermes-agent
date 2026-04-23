@@ -418,7 +418,8 @@ def test_401_refresh_fails_is_non_retryable(monkeypatch):
 
 
 def test_prompt_too_long_triggers_compression(monkeypatch):
-    """Anthropic 'prompt is too long' error should trigger context compression, not immediate fail."""
+    """Anthropic 'prompt is too long' error should trigger context compression
+    and retry when compression actually shrinks the history."""
     _patch_agent_bootstrap(monkeypatch)
     monkeypatch.setattr(
         "agent.anthropic_adapter.build_anthropic_client", _fake_build_anthropic_client
@@ -440,12 +441,12 @@ def test_prompt_too_long_triggers_compression(monkeypatch):
 
         def _compress_context(self, messages, system_message, approx_tokens=0, task_id=None):
             type(self).compress_called += 1
-            # Simulate compression by dropping oldest non-system message
-            if len(messages) > 2:
-                compressed = [messages[0]] + messages[2:]
-            else:
-                compressed = messages
-            return compressed, system_message
+            # Simulate real compression: collapse all history into a single
+            # summary message.  Returns a strictly smaller list so the retry
+            # gate (`len(messages) < original_len`) trips.
+            if len(messages) > 1:
+                return [{"role": "user", "content": "summary"}], system_message
+            return messages, system_message
 
         def run_conversation(self, user_message, conversation_history=None, task_id=None):
             calls = {"n": 0}
@@ -493,9 +494,17 @@ def test_prompt_too_long_triggers_compression(monkeypatch):
         chat_type="dm", user_id="test-user-1",
     )
 
+    # Prime history with multiple turns so compression has something to drop.
+    history = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+
     result = asyncio.run(
         runner._run_agent(
-            message="hello", context_prompt="", history=[],
+            message="hello", context_prompt="", history=history,
             source=source, session_id="session-prompt-long",
             session_key="agent:main:local:dm",
         )
