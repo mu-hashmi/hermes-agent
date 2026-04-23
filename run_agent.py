@@ -90,7 +90,6 @@ from agent.prompt_builder import (
 from agent.model_metadata import (
     fetch_model_metadata,
     estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
-    get_next_probe_tier, parse_context_limit_from_error,
     parse_available_output_tokens_from_error,
     save_context_length, is_local_endpoint,
     query_ollama_num_ctx,
@@ -11031,61 +11030,15 @@ class AIAgent:
                             restart_with_compressed_messages = True
                             break
 
-                        # Error is about the INPUT being too large — reduce context_length.
-                        # Try to parse the actual limit from the error message
-                        parsed_limit = parse_context_limit_from_error(error_msg)
-                        _provider_lower = (getattr(self, "provider", "") or "").lower()
-                        _base_lower = (getattr(self, "base_url", "") or "").rstrip("/").lower()
-                        is_minimax_provider = (
-                            _provider_lower in {"minimax", "minimax-cn"}
-                            or _base_lower.startswith((
-                                "https://api.minimax.io/anthropic",
-                                "https://api.minimaxi.com/anthropic",
-                            ))
-                        )
-                        minimax_delta_only_overflow = (
-                            is_minimax_provider
-                            and parsed_limit is None
-                            and "context window exceeds limit (" in error_msg
-                        )
-                        if parsed_limit and parsed_limit < old_ctx:
-                            new_ctx = parsed_limit
-                            self._vprint(f"{self.log_prefix}Context limit detected from API: {new_ctx:,} tokens (was {old_ctx:,})", force=True)
-                        elif minimax_delta_only_overflow:
-                            new_ctx = old_ctx
-                            self._vprint(
-                                f"{self.log_prefix}Provider reported overflow amount only; "
-                                f"keeping context_length at {old_ctx:,} tokens and compressing.",
-                                force=True,
-                            )
-                        else:
-                            # Step down to the next probe tier
-                            new_ctx = get_next_probe_tier(old_ctx)
-
-                        if new_ctx and new_ctx < old_ctx:
-                            compressor.update_model(
-                                model=self.model,
-                                context_length=new_ctx,
-                                base_url=self.base_url,
-                                api_key=getattr(self, "api_key", ""),
-                                provider=self.provider,
-                            )
-                            # Context probing flags — only set on built-in
-                            # compressor (plugin engines manage their own).
-                            if hasattr(compressor, "_context_probed"):
-                                compressor._context_probed = True
-                                # Only persist limits parsed from the provider's
-                                # error message (a real number).  Guessed fallback
-                                # tiers from get_next_probe_tier() should stay
-                                # in-memory only — persisting them pollutes the
-                                # cache with wrong values.
-                                compressor._context_probe_persistable = bool(
-                                    parsed_limit and parsed_limit == new_ctx
-                                )
-                            self._vprint(f"{self.log_prefix}⚠️  Context length exceeded — stepping down: {old_ctx:,} → {new_ctx:,} tokens", force=True)
-                        else:
-                            self._vprint(f"{self.log_prefix}⚠️  Context length exceeded at minimum tier — attempting compression...", force=True)
-
+                        # Error is about the INPUT being too large.  We
+                        # deliberately do NOT reduce context_length here —
+                        # the configured window is the user's source of
+                        # truth, and shrinking it on every overflow led to
+                        # huge cliff drops (e.g. 400K → 128K) that
+                        # amputated the session.  Just compress and retry
+                        # at the existing context_length.  If compression
+                        # can't shrink enough to fit, we'll bail out via
+                        # the max_compression_attempts guard below.
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
                             self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
@@ -11113,14 +11066,15 @@ class AIAgent:
                         # messages to the new session, not skipping them.
                         conversation_history = None
 
-                        if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
-                            if len(messages) < original_len:
-                                self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                        if len(messages) < original_len:
+                            self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
                         else:
-                            # Can't compress further and already at minimum tier
+                            # Compression couldn't reduce message count — the
+                            # conversation is already as tight as it gets but
+                            # still exceeds the window.
                             self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
                             self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
                             logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
