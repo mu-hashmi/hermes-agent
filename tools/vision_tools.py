@@ -406,13 +406,15 @@ async def vision_analyze_tool(
     image_url: str,
     user_prompt: str,
     model: str = None,
+    reasoning_effort: str = None,
 ) -> str:
     """
     Analyze an image from a URL or local file path using vision AI.
     
     This tool accepts either an HTTP/HTTPS URL or a local file path. For URLs,
     it downloads the image first. In both cases, the image is converted to base64
-    and processed using Gemini 3 Flash Preview via OpenRouter API.
+    and processed using the configured vision backend (default: Haiku 4.5 via
+    Anthropic).
     
     The user_prompt parameter is expected to be pre-formatted by the calling
     function (typically model_tools.py) to include both full description
@@ -422,7 +424,12 @@ async def vision_analyze_tool(
         image_url (str): The URL or local file path of the image to analyze.
                          Accepts http://, https:// URLs or absolute/relative file paths.
         user_prompt (str): The pre-formatted prompt for the vision model
-        model (str): The vision model to use (default: google/gemini-3-flash-preview)
+        model (str): The vision model to use. Omit to use the configured default.
+        reasoning_effort (str): Optional 'low', 'medium', or 'high'. Passed through
+                                via extra_body.reasoning_effort so reasoning-capable
+                                backends (Opus 4.7, Gemini 3 Pro, GPT-5, etc.) spend
+                                more compute on complex images. Ignored on non-
+                                reasoning models (e.g. Haiku 4.5).
     
     Returns:
         str: JSON string containing the analysis results with the following structure:
@@ -570,6 +577,10 @@ async def vision_analyze_tool(
         }
         if model:
             call_kwargs["model"] = model
+        if reasoning_effort:
+            # Route through extra_body so the provider adapter (Anthropic,
+            # OpenAI, Gemini) can translate to its native reasoning knob.
+            call_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
         # Try full-size image first; on size-related rejection, downscale and retry.
         try:
             response = await async_call_llm(**call_kwargs)
@@ -760,6 +771,27 @@ VISION_ANALYZE_SCHEMA = {
             "question": {
                 "type": "string",
                 "description": "Your specific question or request about the image to resolve. The AI will automatically provide a complete image description AND answer your specific question."
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Override the configured default vision model for this call. "
+                    "Use when the image requires stronger reasoning than the default (e.g. code screenshots, "
+                    "complex layouts, multi-step inference about what's shown). "
+                    "Examples: 'claude-opus-4-7', 'google/gemini-3-pro', 'openai/gpt-5', "
+                    "'anthropic/claude-sonnet-4-6'. Omit to use the configured default "
+                    "(set in config.yaml auxiliary.vision.model or AUXILIARY_VISION_MODEL env)."
+                )
+            },
+            "reasoning_effort": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": (
+                    "Reasoning effort for the vision model. Ignored unless a reasoning-capable model "
+                    "is selected. When you pass a 'model' override and leave this blank, defaults to 'high'. "
+                    "When the configured default (Haiku 4.5) is used, this parameter has no effect because "
+                    "Haiku does not support extended thinking."
+                )
             }
         },
         "required": ["image_url", "question"]
@@ -774,8 +806,21 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
         "Fully describe and explain everything about this image, then answer the "
         f"following question:\n\n{question}"
     )
-    model = os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
-    return vision_analyze_tool(image_url, full_prompt, model)
+    # Tool arg wins; fall back to env var; fall back to configured default.
+    model_arg = (args.get("model") or "").strip() or None
+    env_model = os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
+    model = model_arg or env_model
+
+    # Reasoning: explicit arg > default "high" when the caller overrode the model > None.
+    reasoning_arg = (args.get("reasoning_effort") or "").strip().lower() or None
+    if reasoning_arg:
+        reasoning_effort = reasoning_arg
+    elif model_arg:
+        reasoning_effort = "high"
+    else:
+        reasoning_effort = None
+
+    return vision_analyze_tool(image_url, full_prompt, model, reasoning_effort=reasoning_effort)
 
 
 registry.register(
