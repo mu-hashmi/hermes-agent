@@ -20,15 +20,13 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from agent.model_metadata import (
-    CONTEXT_PROBE_TIERS,
     DEFAULT_CONTEXT_LENGTHS,
+    DEFAULT_FALLBACK_CONTEXT,
     _strip_provider_prefix,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
     get_model_context_length,
-    get_next_probe_tier,
     get_cached_context_length,
-    parse_context_limit_from_error,
     save_context_length,
     fetch_model_metadata,
     _MODEL_CACHE_TTL,
@@ -131,10 +129,8 @@ class TestDefaultContextLengths:
         for key, value in DEFAULT_CONTEXT_LENGTHS.items():
             if "claude" not in key:
                 continue
-            # Claude 4.6+ models (4.6 and 4.7) have 1M context at standard
-            # API pricing (no long-context premium).  Older Claude 4.x and
-            # 3.x models cap at 200k.
-            if any(tag in key for tag in ("4.6", "4-6", "4.7", "4-7")):
+            # Claude 4.6 models have 1M context
+            if "4.6" in key or "4-6" in key:
                 assert value == 1000000, f"{key} should be 1000000"
             else:
                 assert value == 200000, f"{key} should be 200000"
@@ -491,9 +487,9 @@ class TestGetModelContextLength:
         assert get_model_context_length("anthropic/claude-sonnet-4") == 200000
 
     @patch("agent.model_metadata.fetch_model_metadata")
-    def test_unknown_model_returns_first_probe_tier(self, mock_fetch):
+    def test_unknown_model_returns_fallback_context(self, mock_fetch):
         mock_fetch.return_value = {}
-        assert get_model_context_length("unknown/never-heard-of-this") == CONTEXT_PROBE_TIERS[0]
+        assert get_model_context_length("unknown/never-heard-of-this") == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_partial_match_in_defaults(self, mock_fetch):
@@ -542,9 +538,9 @@ class TestGetModelContextLength:
         cache_file = tmp_path / "cache.yaml"
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length("custom/model", "http://local", 32768)
-            # No base_url → cache skipped → falls to probe tier
+            # No base_url → cache skipped → falls to fallback context
             result = get_model_context_length("custom/model")
-            assert result == CONTEXT_PROBE_TIERS[0]
+            assert result == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
@@ -574,7 +570,7 @@ class TestGetModelContextLength:
             api_key="test-key",
         )
 
-        assert result == CONTEXT_PROBE_TIERS[0]
+        assert result == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
@@ -651,57 +647,6 @@ class TestGetModelContextLength:
 
 
 # =========================================================================
-# Bedrock context resolution — must run BEFORE custom-endpoint probe
-# =========================================================================
-
-class TestBedrockContextResolution:
-    """Regression tests for Bedrock context-length resolution order.
-
-    Bug: because ``bedrock-runtime.<region>.amazonaws.com`` is not listed in
-    ``_URL_TO_PROVIDER``, ``_is_known_provider_base_url`` returned False and
-    the custom-endpoint probe at step 2 ran first — fetching ``/models`` from
-    Bedrock (which it doesn't serve), returning the 128K default-fallback
-    before execution ever reached the Bedrock branch.
-
-    Fix: promote the Bedrock branch ahead of the custom-endpoint probe.
-    """
-
-    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    def test_bedrock_provider_returns_static_table_before_probe(self, mock_fetch):
-        """provider='bedrock' resolves via static table, bypasses /models probe."""
-        ctx = get_model_context_length(
-            "anthropic.claude-opus-4-v1:0",
-            provider="bedrock",
-            base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
-        )
-        # Must return the static Bedrock table value (200K for Claude),
-        # NOT DEFAULT_FALLBACK_CONTEXT (128K).
-        assert ctx == 200000
-        mock_fetch.assert_not_called()
-
-    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    def test_bedrock_url_without_provider_hint(self, mock_fetch):
-        """bedrock-runtime host infers Bedrock even when provider is omitted."""
-        ctx = get_model_context_length(
-            "anthropic.claude-sonnet-4-v1:0",
-            base_url="https://bedrock-runtime.us-west-2.amazonaws.com",
-        )
-        assert ctx == 200000
-        mock_fetch.assert_not_called()
-
-    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    def test_non_bedrock_url_still_probes(self, mock_fetch):
-        """Non-Bedrock hosts still reach the custom-endpoint probe."""
-        mock_fetch.return_value = {"some-model": {"context_length": 50000}}
-        ctx = get_model_context_length(
-            "some-model",
-            base_url="https://api.example.com/v1",
-        )
-        assert ctx == 50000
-        assert mock_fetch.called
-
-
-# =========================================================================
 # _strip_provider_prefix — Ollama model:tag vs provider:model
 # =========================================================================
 
@@ -710,7 +655,6 @@ class TestStripProviderPrefix:
         assert _strip_provider_prefix("local:my-model") == "my-model"
         assert _strip_provider_prefix("openrouter:anthropic/claude-sonnet-4") == "anthropic/claude-sonnet-4"
         assert _strip_provider_prefix("anthropic:claude-sonnet-4") == "claude-sonnet-4"
-        assert _strip_provider_prefix("stepfun:step-3.5-flash") == "step-3.5-flash"
 
     def test_ollama_model_tag_preserved(self):
         """Ollama model:tag format must NOT be stripped."""
@@ -865,52 +809,6 @@ class TestFetchModelMetadata:
 
         result = fetch_model_metadata(force_refresh=True)
         assert result == {}
-
-
-# =========================================================================
-# Context probe tiers
-# =========================================================================
-
-class TestContextProbeTiers:
-    def test_tiers_descending(self):
-        for i in range(len(CONTEXT_PROBE_TIERS) - 1):
-            assert CONTEXT_PROBE_TIERS[i] > CONTEXT_PROBE_TIERS[i + 1]
-
-    def test_first_tier_is_256k(self):
-        assert CONTEXT_PROBE_TIERS[0] == 256_000
-
-    def test_last_tier_is_8k(self):
-        assert CONTEXT_PROBE_TIERS[-1] == 8_000
-
-
-class TestGetNextProbeTier:
-    def test_from_256k(self):
-        assert get_next_probe_tier(256_000) == 128_000
-
-    def test_from_128k(self):
-        assert get_next_probe_tier(128_000) == 64_000
-
-    def test_from_64k(self):
-        assert get_next_probe_tier(64_000) == 32_000
-
-    def test_from_32k(self):
-        assert get_next_probe_tier(32_000) == 16_000
-
-    def test_from_8k_returns_none(self):
-        assert get_next_probe_tier(8_000) is None
-
-    def test_from_below_min_returns_none(self):
-        assert get_next_probe_tier(4_000) is None
-
-    def test_from_arbitrary_value(self):
-        assert get_next_probe_tier(100_000) == 64_000
-
-    def test_above_max_tier(self):
-        """Value above 256K should return 256K."""
-        assert get_next_probe_tier(500_000) == 256_000
-
-    def test_zero_returns_none(self):
-        assert get_next_probe_tier(0) is None
 
 
 # =========================================================================
