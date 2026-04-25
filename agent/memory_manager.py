@@ -259,7 +259,12 @@ class MemoryManager:
         if provider is None:
             return tool_error(f"No memory provider handles tool '{tool_name}'")
         try:
-            return provider.handle_tool_call(tool_name, args, **kwargs)
+            result = provider.handle_tool_call(tool_name, args, **kwargs)
+            # Ensure we always return a JSON string — plugins may return dicts
+            if not isinstance(result, str):
+                import json
+                result = json.dumps(result)
+            return result
         except Exception as e:
             logger.error(
                 "Memory provider '%s' handle_tool_call(%s) failed: %s",
