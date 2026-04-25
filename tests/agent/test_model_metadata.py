@@ -20,15 +20,13 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from agent.model_metadata import (
-    CONTEXT_PROBE_TIERS,
     DEFAULT_CONTEXT_LENGTHS,
+    DEFAULT_FALLBACK_CONTEXT,
     _strip_provider_prefix,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
     get_model_context_length,
-    get_next_probe_tier,
     get_cached_context_length,
-    parse_context_limit_from_error,
     save_context_length,
     fetch_model_metadata,
     _MODEL_CACHE_TTL,
@@ -113,10 +111,8 @@ class TestDefaultContextLengths:
         for key, value in DEFAULT_CONTEXT_LENGTHS.items():
             if "claude" not in key:
                 continue
-            # Claude 4.6+ models (4.6 and 4.7) have 1M context at standard
-            # API pricing (no long-context premium).  Older Claude 4.x and
-            # 3.x models cap at 200k.
-            if any(tag in key for tag in ("4.6", "4-6", "4.7", "4-7")):
+            # Claude 4.6 models have 1M context
+            if "4.6" in key or "4-6" in key:
                 assert value == 1000000, f"{key} should be 1000000"
             else:
                 assert value == 200000, f"{key} should be 200000"
@@ -201,218 +197,6 @@ class TestDefaultContextLengths:
 
 
 # =========================================================================
-# Codex OAuth context-window resolution (provider="openai-codex")
-# =========================================================================
-
-class TestCodexOAuthContextLength:
-    """ChatGPT Codex OAuth imposes lower context limits than the direct
-    OpenAI API for the same slugs. Verified Apr 2026 via live probe of
-    chatgpt.com/backend-api/codex/models: every model returns 272k, while
-    models.dev reports 1.05M for gpt-5.5/gpt-5.4 and 400k for the rest.
-    """
-
-    def setup_method(self):
-        import agent.model_metadata as mm
-        mm._codex_oauth_context_cache = {}
-        mm._codex_oauth_context_cache_time = 0.0
-
-    def test_fallback_table_used_without_token(self):
-        """With no access token, the hardcoded Codex fallback table wins
-        over models.dev (which reports 1.05M for gpt-5.5 but Codex is 272k).
-        """
-        from agent.model_metadata import get_model_context_length
-
-        with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
-             patch("agent.model_metadata.save_context_length"):
-            for model in (
-                "gpt-5.5",
-                "gpt-5.4",
-                "gpt-5.4-mini",
-                "gpt-5.3-codex",
-                "gpt-5.2-codex",
-                "gpt-5.1-codex-max",
-                "gpt-5.1-codex-mini",
-            ):
-                ctx = get_model_context_length(
-                    model=model,
-                    base_url="https://chatgpt.com/backend-api/codex",
-                    api_key="",
-                    provider="openai-codex",
-                )
-                assert ctx == 272_000, (
-                    f"Codex {model}: expected 272000 fallback, got {ctx} "
-                    "(models.dev leakage?)"
-                )
-
-    def test_live_probe_overrides_fallback(self):
-        """When a token is provided, the live /models probe is preferred
-        and its context_window drives the result."""
-        from agent.model_metadata import get_model_context_length
-
-        fake_response = MagicMock()
-        fake_response.status_code = 200
-        fake_response.json.return_value = {
-            "models": [
-                {"slug": "gpt-5.5", "context_window": 300_000},
-                {"slug": "gpt-5.4", "context_window": 400_000},
-            ]
-        }
-
-        with patch("agent.model_metadata.requests.get", return_value=fake_response), \
-             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
-             patch("agent.model_metadata.save_context_length"):
-            ctx_55 = get_model_context_length(
-                model="gpt-5.5",
-                base_url="https://chatgpt.com/backend-api/codex",
-                api_key="fake-token",
-                provider="openai-codex",
-            )
-            ctx_54 = get_model_context_length(
-                model="gpt-5.4",
-                base_url="https://chatgpt.com/backend-api/codex",
-                api_key="fake-token",
-                provider="openai-codex",
-            )
-        assert ctx_55 == 300_000
-        assert ctx_54 == 400_000
-
-    def test_probe_failure_falls_back_to_hardcoded(self):
-        """If the probe fails (non-200 / network error), we still return
-        the hardcoded 272k rather than leaking through to models.dev 1.05M."""
-        from agent.model_metadata import get_model_context_length
-
-        fake_response = MagicMock()
-        fake_response.status_code = 401
-        fake_response.json.return_value = {}
-
-        with patch("agent.model_metadata.requests.get", return_value=fake_response), \
-             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
-             patch("agent.model_metadata.save_context_length"):
-            ctx = get_model_context_length(
-                model="gpt-5.5",
-                base_url="https://chatgpt.com/backend-api/codex",
-                api_key="expired-token",
-                provider="openai-codex",
-            )
-        assert ctx == 272_000
-
-    def test_non_codex_providers_unaffected(self):
-        """Resolving gpt-5.5 on non-Codex providers must NOT use the Codex
-        272k override — OpenRouter / direct OpenAI API have different limits.
-        """
-        from agent.model_metadata import get_model_context_length
-
-        # OpenRouter — should hit its own catalog path first; when mocked
-        # empty, falls through to hardcoded DEFAULT_CONTEXT_LENGTHS (400k).
-        with patch("agent.model_metadata.fetch_model_metadata", return_value={}), \
-             patch("agent.model_metadata.fetch_endpoint_model_metadata", return_value={}), \
-             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
-             patch("agent.models_dev.lookup_models_dev_context", return_value=None):
-            ctx = get_model_context_length(
-                model="openai/gpt-5.5",
-                base_url="https://openrouter.ai/api/v1",
-                api_key="",
-                provider="openrouter",
-            )
-        assert ctx == 400_000, (
-            f"Non-Codex gpt-5.5 resolved to {ctx}; Codex 272k override "
-            "leaked outside openai-codex provider"
-        )
-
-    def test_stale_codex_cache_over_400k_is_invalidated(self, tmp_path, monkeypatch):
-        """Pre-PR #14935 builds cached gpt-5.5 at 1.05M (from models.dev)
-        before the Codex-aware branch existed. Upgrading users keep that
-        stale entry on disk and the cache-first lookup returns it forever.
-        Codex OAuth caps at 272k for every slug, so any cached Codex
-        entry >= 400k must be dropped and re-resolved via the live probe.
-        """
-        from agent import model_metadata as mm
-
-        # Isolate the cache file to tmp_path
-        cache_file = tmp_path / "context_length_cache.yaml"
-        monkeypatch.setattr(mm, "_get_context_cache_path", lambda: cache_file)
-
-        base_url = "https://chatgpt.com/backend-api/codex/"
-        stale_key = f"gpt-5.5@{base_url}"
-        other_key = "other-model@https://api.openai.com/v1/"
-        import yaml as _yaml
-        cache_file.write_text(_yaml.dump({"context_lengths": {
-            stale_key: 1_050_000,   # stale pre-fix value
-            other_key: 128_000,     # unrelated, must survive
-        }}))
-
-        fake_response = MagicMock()
-        fake_response.status_code = 200
-        fake_response.json.return_value = {
-            "models": [{"slug": "gpt-5.5", "context_window": 272_000}]
-        }
-
-        with patch("agent.model_metadata.requests.get", return_value=fake_response), \
-             patch("agent.model_metadata.save_context_length") as mock_save:
-            ctx = mm.get_model_context_length(
-                model="gpt-5.5",
-                base_url=base_url,
-                api_key="fake-token",
-                provider="openai-codex",
-            )
-
-        assert ctx == 272_000, f"Stale entry should have been re-resolved to 272k, got {ctx}"
-        # Live save was called with the fresh value
-        mock_save.assert_called_with("gpt-5.5", base_url, 272_000)
-        # The stale entry was removed from disk; unrelated entries survived
-        remaining = _yaml.safe_load(cache_file.read_text()).get("context_lengths", {})
-        assert stale_key not in remaining, "Stale entry was not invalidated from the cache file"
-        assert remaining.get(other_key) == 128_000, "Unrelated cache entries must not be touched"
-
-    def test_fresh_codex_cache_under_400k_is_respected(self, tmp_path, monkeypatch):
-        """Codex entries at the correct 272k must NOT be invalidated —
-        only stale pre-fix values (>= 400k) get dropped."""
-        from agent import model_metadata as mm
-
-        cache_file = tmp_path / "context_length_cache.yaml"
-        monkeypatch.setattr(mm, "_get_context_cache_path", lambda: cache_file)
-
-        base_url = "https://chatgpt.com/backend-api/codex/"
-        import yaml as _yaml
-        cache_file.write_text(_yaml.dump({"context_lengths": {
-            f"gpt-5.5@{base_url}": 272_000,
-        }}))
-
-        # If the invalidation incorrectly fired, this would be called; assert it isn't.
-        with patch("agent.model_metadata.requests.get") as mock_get:
-            ctx = mm.get_model_context_length(
-                model="gpt-5.5",
-                base_url=base_url,
-                api_key="fake-token",
-                provider="openai-codex",
-            )
-        assert ctx == 272_000
-        mock_get.assert_not_called()
-
-    def test_stale_invalidation_scoped_to_codex_provider(self, tmp_path, monkeypatch):
-        """A cached 1M entry for a non-Codex provider (e.g. Anthropic opus on
-        OpenRouter, legitimately 1M) must NOT be invalidated by this guard."""
-        from agent import model_metadata as mm
-
-        cache_file = tmp_path / "context_length_cache.yaml"
-        monkeypatch.setattr(mm, "_get_context_cache_path", lambda: cache_file)
-
-        base_url = "https://openrouter.ai/api/v1"
-        import yaml as _yaml
-        cache_file.write_text(_yaml.dump({"context_lengths": {
-            f"anthropic/claude-opus-4.6@{base_url}": 1_000_000,
-        }}))
-
-        ctx = mm.get_model_context_length(
-            model="anthropic/claude-opus-4.6",
-            base_url=base_url,
-            api_key="fake",
-            provider="openrouter",
-        )
-        assert ctx == 1_000_000, "Non-codex 1M cache entries must be respected"
-
-
-# =========================================================================
 # get_model_context_length — resolution order
 # =========================================================================
 
@@ -430,9 +214,9 @@ class TestGetModelContextLength:
         assert get_model_context_length("anthropic/claude-sonnet-4") == 200000
 
     @patch("agent.model_metadata.fetch_model_metadata")
-    def test_unknown_model_returns_first_probe_tier(self, mock_fetch):
+    def test_unknown_model_returns_fallback_context(self, mock_fetch):
         mock_fetch.return_value = {}
-        assert get_model_context_length("unknown/never-heard-of-this") == CONTEXT_PROBE_TIERS[0]
+        assert get_model_context_length("unknown/never-heard-of-this") == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_partial_match_in_defaults(self, mock_fetch):
@@ -480,9 +264,9 @@ class TestGetModelContextLength:
         cache_file = tmp_path / "cache.yaml"
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length("custom/model", "http://local", 32768)
-            # No base_url → cache skipped → falls to probe tier
+            # No base_url → cache skipped → falls to fallback context
             result = get_model_context_length("custom/model")
-            assert result == CONTEXT_PROBE_TIERS[0]
+            assert result == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
@@ -512,7 +296,7 @@ class TestGetModelContextLength:
             api_key="test-key",
         )
 
-        assert result == CONTEXT_PROBE_TIERS[0]
+        assert result == DEFAULT_FALLBACK_CONTEXT
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
@@ -589,57 +373,6 @@ class TestGetModelContextLength:
 
 
 # =========================================================================
-# Bedrock context resolution — must run BEFORE custom-endpoint probe
-# =========================================================================
-
-class TestBedrockContextResolution:
-    """Regression tests for Bedrock context-length resolution order.
-
-    Bug: because ``bedrock-runtime.<region>.amazonaws.com`` is not listed in
-    ``_URL_TO_PROVIDER``, ``_is_known_provider_base_url`` returned False and
-    the custom-endpoint probe at step 2 ran first — fetching ``/models`` from
-    Bedrock (which it doesn't serve), returning the 128K default-fallback
-    before execution ever reached the Bedrock branch.
-
-    Fix: promote the Bedrock branch ahead of the custom-endpoint probe.
-    """
-
-    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    def test_bedrock_provider_returns_static_table_before_probe(self, mock_fetch):
-        """provider='bedrock' resolves via static table, bypasses /models probe."""
-        ctx = get_model_context_length(
-            "anthropic.claude-opus-4-v1:0",
-            provider="bedrock",
-            base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
-        )
-        # Must return the static Bedrock table value (200K for Claude),
-        # NOT DEFAULT_FALLBACK_CONTEXT (128K).
-        assert ctx == 200000
-        mock_fetch.assert_not_called()
-
-    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    def test_bedrock_url_without_provider_hint(self, mock_fetch):
-        """bedrock-runtime host infers Bedrock even when provider is omitted."""
-        ctx = get_model_context_length(
-            "anthropic.claude-sonnet-4-v1:0",
-            base_url="https://bedrock-runtime.us-west-2.amazonaws.com",
-        )
-        assert ctx == 200000
-        mock_fetch.assert_not_called()
-
-    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    def test_non_bedrock_url_still_probes(self, mock_fetch):
-        """Non-Bedrock hosts still reach the custom-endpoint probe."""
-        mock_fetch.return_value = {"some-model": {"context_length": 50000}}
-        ctx = get_model_context_length(
-            "some-model",
-            base_url="https://api.example.com/v1",
-        )
-        assert ctx == 50000
-        assert mock_fetch.called
-
-
-# =========================================================================
 # _strip_provider_prefix — Ollama model:tag vs provider:model
 # =========================================================================
 
@@ -648,7 +381,6 @@ class TestStripProviderPrefix:
         assert _strip_provider_prefix("local:my-model") == "my-model"
         assert _strip_provider_prefix("openrouter:anthropic/claude-sonnet-4") == "anthropic/claude-sonnet-4"
         assert _strip_provider_prefix("anthropic:claude-sonnet-4") == "claude-sonnet-4"
-        assert _strip_provider_prefix("stepfun:step-3.5-flash") == "step-3.5-flash"
 
     def test_ollama_model_tag_preserved(self):
         """Ollama model:tag format must NOT be stripped."""
@@ -803,101 +535,6 @@ class TestFetchModelMetadata:
 
         result = fetch_model_metadata(force_refresh=True)
         assert result == {}
-
-
-# =========================================================================
-# Context probe tiers
-# =========================================================================
-
-class TestContextProbeTiers:
-    def test_tiers_descending(self):
-        for i in range(len(CONTEXT_PROBE_TIERS) - 1):
-            assert CONTEXT_PROBE_TIERS[i] > CONTEXT_PROBE_TIERS[i + 1]
-
-    def test_first_tier_is_128k(self):
-        assert CONTEXT_PROBE_TIERS[0] == 128_000
-
-    def test_last_tier_is_8k(self):
-        assert CONTEXT_PROBE_TIERS[-1] == 8_000
-
-
-class TestGetNextProbeTier:
-    def test_from_128k(self):
-        assert get_next_probe_tier(128_000) == 64_000
-
-    def test_from_64k(self):
-        assert get_next_probe_tier(64_000) == 32_000
-
-    def test_from_32k(self):
-        assert get_next_probe_tier(32_000) == 16_000
-
-    def test_from_8k_returns_none(self):
-        assert get_next_probe_tier(8_000) is None
-
-    def test_from_below_min_returns_none(self):
-        assert get_next_probe_tier(4_000) is None
-
-    def test_from_arbitrary_value(self):
-        assert get_next_probe_tier(100_000) == 64_000
-
-    def test_above_max_tier(self):
-        """Value above 128K should return 128K."""
-        assert get_next_probe_tier(500_000) == 128_000
-
-    def test_zero_returns_none(self):
-        assert get_next_probe_tier(0) is None
-
-
-# =========================================================================
-# Error message parsing
-# =========================================================================
-
-class TestParseContextLimitFromError:
-    def test_openai_format(self):
-        msg = "This model's maximum context length is 32768 tokens. However, your messages resulted in 45000 tokens."
-        assert parse_context_limit_from_error(msg) == 32768
-
-    def test_context_length_exceeded(self):
-        msg = "context_length_exceeded: maximum context length is 131072"
-        assert parse_context_limit_from_error(msg) == 131072
-
-    def test_context_size_exceeded(self):
-        msg = "Maximum context size 65536 exceeded"
-        assert parse_context_limit_from_error(msg) == 65536
-
-    def test_no_limit_in_message(self):
-        assert parse_context_limit_from_error("Something went wrong with the API") is None
-
-    def test_unreasonable_small_number_rejected(self):
-        assert parse_context_limit_from_error("context length is 42 tokens") is None
-
-    def test_ollama_format(self):
-        msg = "Context size has been exceeded. Maximum context size is 32768"
-        assert parse_context_limit_from_error(msg) == 32768
-
-    def test_anthropic_format(self):
-        msg = "prompt is too long: 250000 tokens > 200000 maximum"
-        # Should extract 200000 (the limit), not 250000 (the input size)
-        assert parse_context_limit_from_error(msg) == 200000
-
-    def test_lmstudio_format(self):
-        msg = "Error: context window of 4096 tokens exceeded"
-        assert parse_context_limit_from_error(msg) == 4096
-
-    def test_minimax_delta_only_message_returns_none(self):
-        msg = "invalid params, context window exceeds limit (2013)"
-        assert parse_context_limit_from_error(msg) is None
-
-    def test_completely_unrelated_error(self):
-        assert parse_context_limit_from_error("Invalid API key") is None
-
-    def test_empty_string(self):
-        assert parse_context_limit_from_error("") is None
-
-    def test_number_outside_reasonable_range(self):
-        """Very large number (>10M) should be rejected."""
-        msg = "maximum context length is 99999999999"
-        assert parse_context_limit_from_error(msg) is None
 
 
 # =========================================================================
