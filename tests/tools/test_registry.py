@@ -293,6 +293,7 @@ class TestBuiltinDiscovery:
         expected = {
             "tools.browser_cdp_tool",
             "tools.browser_dialog_tool",
+            "tools.browser_harness_tool",
             "tools.browser_tool",
             "tools.clarify_tool",
             "tools.code_execution_tool",
