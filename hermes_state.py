@@ -29,7 +29,30 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-DEFAULT_DB_PATH = get_hermes_home() / "state.db"
+def _default_db_path() -> Path:
+    """Resolve the default state.db path *lazily*.
+
+    Evaluating ``get_hermes_home()`` at module-import time freezes the
+    path to whatever ``HERMES_HOME`` (or ``Path.home() / .hermes``) was
+    when ``hermes_state`` was first imported. Test fixtures that
+    monkeypatch ``HERMES_HOME`` AFTER import (e.g. tests/conftest.py)
+    are silently bypassed and ``SessionDB()`` ends up writing to the
+    real user's ``~/.hermes/state.db``. Resolve at call time instead.
+    """
+    return get_hermes_home() / "state.db"
+
+
+def __getattr__(name: str):
+    """Module-level lazy attribute access (PEP 562).
+
+    Preserves the public ``DEFAULT_DB_PATH`` name for callers that do
+    ``from hermes_state import DEFAULT_DB_PATH`` without the import-time
+    pinning that caused real-state.db pollution from tests. Each access
+    re-resolves via :func:`_default_db_path`.
+    """
+    if name == "DEFAULT_DB_PATH":
+        return _default_db_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 SCHEMA_VERSION = 8
 
@@ -143,7 +166,7 @@ class SessionDB:
     _CHECKPOINT_EVERY_N_WRITES = 50
 
     def __init__(self, db_path: Path = None):
-        self.db_path = db_path or DEFAULT_DB_PATH
+        self.db_path = db_path or _default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.Lock()
