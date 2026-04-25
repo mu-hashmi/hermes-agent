@@ -590,6 +590,17 @@ class _AnthropicCompletionsAdapter:
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens") or 2000
         temperature = kwargs.get("temperature")
 
+        # Pull reasoning_effort out of extra_body and translate into the
+        # reasoning_config shape build_anthropic_kwargs understands. Without
+        # this, auxiliary callers (vision_analyze, web_extract, etc.) have no
+        # way to turn on extended thinking on reasoning-capable Claudes.
+        reasoning_config = None
+        extra_body = kwargs.get("extra_body") or {}
+        if isinstance(extra_body, dict):
+            effort = extra_body.get("reasoning_effort")
+            if isinstance(effort, str) and effort.strip():
+                reasoning_config = {"effort": effort.strip().lower()}
+
         normalized_tool_choice = None
         if isinstance(tool_choice, str):
             normalized_tool_choice = tool_choice
@@ -605,7 +616,7 @@ class _AnthropicCompletionsAdapter:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
-            reasoning_config=None,
+            reasoning_config=reasoning_config,
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
         )
