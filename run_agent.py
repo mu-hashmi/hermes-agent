@@ -8000,6 +8000,23 @@ class AIAgent:
                 self._session_db.update_system_prompt(self.session_id, new_system_prompt)
                 # Reset flush cursor — new session starts with no messages written
                 self._last_flushed_db_idx = 0
+                # Durability: flush the post-compression message list to the
+                # new session row IMMEDIATELY. Without this, the compressed
+                # summary lives only in self.conversation_history (in memory)
+                # until the next agent-loop iteration's flush. If the process
+                # dies between here and that flush — Ctrl+C interrupting an
+                # already-blocking shutdown_mcp_servers, OOM, crash — the new
+                # session row exists with zero messages and the entire
+                # compressed transcript is lost. Caller's `compressed` list
+                # is the authoritative state at this moment; persist it now.
+                try:
+                    self._flush_messages_to_session_db(compressed)
+                except Exception as e:
+                    logger.warning(
+                        "Post-compression durability flush failed; "
+                        "messages may be re-flushed on next turn: %s",
+                        e,
+                    )
             except Exception as e:
                 logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
 
