@@ -262,6 +262,12 @@ _MAX_BACKOFF_SECONDS = 60
 # Environment variables that are safe to pass to stdio subprocesses
 _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
+    # Cron scheduler sets WIKI_AUTO_REINDEX=false to prevent MCP servers
+    # spawned for cron jobs from auto-scheduling reindex passes that would
+    # collide with each other (or with the daily lint cron that calls
+    # wiki_reindex explicitly).  Interactive sessions don't set this and
+    # the wiki-search server defaults to enabled.
+    "WIKI_AUTO_REINDEX",
 })
 
 # Regex for credential patterns to strip from error messages
