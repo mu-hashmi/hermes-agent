@@ -1214,6 +1214,16 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # scheduler process — every job this process runs is a cron job.
     os.environ["HERMES_CRON_SESSION"] = "1"
 
+    # Disable auto-reindex on the wiki-search MCP for cron-spawned servers.
+    # The 4 daily writer crons (paper-feed, ml-news, agent-discovery, ...)
+    # all run at 6 AM and write new content; if each one auto-scheduled a
+    # reindex, they'd serialize on the indexer's flock and surface
+    # `reindex_lock_active: true` to the LLM, which then misreports the
+    # wiki as "broken" in its Slack DM.  Daily Wiki Lint & Repair calls
+    # wiki_reindex explicitly in STEP 0a so changes still get indexed.
+    # Forwarded to MCP children via _SAFE_ENV_KEYS in tools/mcp_tool.py.
+    os.environ["WIKI_AUTO_REINDEX"] = "false"
+
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
     from gateway.session_context import set_session_vars, clear_session_vars, _VAR_MAP
