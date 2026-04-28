@@ -6354,7 +6354,12 @@ class HermesCLI:
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
 
-        # Load providers for switch_model (picker path needs them below)
+        # Always load user_provs / custom_provs from config — they're needed
+        # whether we're showing the picker (no args) or doing an explicit switch
+        # (args given). Previously this load was inside the no-args branch,
+        # which meant `/model X --provider Y` couldn't see custom_providers
+        # entries at all and reported "Unknown provider 'Y'" even when the
+        # entry was defined in config.yaml.
         user_provs = None
         custom_provs = None
         try:
