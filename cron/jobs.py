@@ -859,10 +859,19 @@ def advance_next_run(job_id: str) -> bool:
                     return False
                 now = _hermes_now().isoformat()
                 new_next = compute_next_run(job["schedule"], now)
-                if new_next and new_next != job.get("next_run_at"):
+                old_next = job.get("next_run_at")
+                if new_next and new_next != old_next:
                     job["next_run_at"] = new_next
                     save_jobs(jobs)
+                    logger.info(
+                        "advance_next_run('%s' / %s): %s → %s",
+                        job_id, job.get("name", "?"), old_next, new_next,
+                    )
                     return True
+                logger.debug(
+                    "advance_next_run('%s' / %s): no-op (next_run_at=%s, computed=%s)",
+                    job_id, job.get("name", "?"), old_next, new_next,
+                )
                 return False
         return False
 
@@ -961,6 +970,14 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             break
                     continue  # Skip this run
 
+            logger.info(
+                "get_due_jobs: due '%s' / %s "
+                "(next_run_at=%s, last_run_at=%s, schedule=%s, lateness=%.1fs)",
+                job["id"], job.get("name", "?"), next_run,
+                job.get("last_run_at"),
+                schedule.get("expr") or schedule.get("display") or schedule,
+                (now - next_run_dt).total_seconds(),
+            )
             due.append(job)
 
     if needs_save:

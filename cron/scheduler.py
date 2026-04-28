@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import subprocess
 import sys
 
@@ -1704,7 +1705,12 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
             return 0
 
         if verbose:
-            logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
+            logger.info(
+                "%s - tick (pid=%d) - %s job(s) due: %s",
+                _hermes_now().strftime('%H:%M:%S'), os.getpid(),
+                len(due_jobs),
+                [(j["id"], j.get("name", "?")) for j in due_jobs],
+            )
 
         # Advance next_run_at for all recurring jobs FIRST, under the file lock,
         # before any execution begins.  This preserves at-most-once semantics.
@@ -1740,6 +1746,13 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
 
         def _process_job(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
+            logger.info(
+                "_process_job entry: '%s' / %s "
+                "(thread=%s, next_run_at=%s, last_run_at=%s)",
+                job["id"], job.get("name", "?"),
+                threading.current_thread().name,
+                job.get("next_run_at"), job.get("last_run_at"),
+            )
             try:
                 success, output, final_response, error = run_job(job)
 
