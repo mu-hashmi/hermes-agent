@@ -2201,7 +2201,22 @@ class HermesCLI:
             "session_total_tokens": 0,
             "session_api_calls": 0,
             "compressions": 0,
+            "reasoning_label": "default",
         }
+
+        # Reasoning effort label for the status bar.  Source of truth is
+        # ``self.reasoning_config`` — set by /reasoning, persisted in
+        # config.yaml's agent.reasoning_effort.  Three shapes:
+        #   None                                  -> model default (display "default")
+        #   {"enabled": False}                    -> /reasoning none (display "none")
+        #   {"enabled": True, "effort": <level>}  -> display the level
+        rc = getattr(self, "reasoning_config", None)
+        if rc is None:
+            snapshot["reasoning_label"] = "default"
+        elif rc.get("enabled") is False:
+            snapshot["reasoning_label"] = "none"
+        else:
+            snapshot["reasoning_label"] = rc.get("effort") or "default"
 
         if not agent:
             return snapshot
@@ -2425,7 +2440,7 @@ class HermesCLI:
             else:
                 context_label = "ctx --"
 
-            parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            parts = [f"⚕ {snapshot['model_short']}", snapshot["reasoning_label"], context_label, percent_label]
             parts.append(duration_label)
             prompt_elapsed = snapshot.get("prompt_elapsed")
             if prompt_elapsed:
@@ -2491,6 +2506,8 @@ class HermesCLI:
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
+                        ("class:status-bar-dim", " │ "),
+                        ("class:status-bar-dim", snapshot["reasoning_label"]),
                         *cwd_frags,
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
