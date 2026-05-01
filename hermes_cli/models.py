@@ -145,6 +145,8 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     # Native OpenAI Chat Completions (api.openai.com). Used by /model counts and
     # provider_model_ids fallback when /v1/models is unavailable.
     "openai": [
+        "gpt-5.5",
+        "gpt-5.5-pro",
         "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5-mini",
@@ -1588,6 +1590,8 @@ def provider_label(provider: Optional[str]) -> str:
 # See https://openai.com/api-priority-processing/ for the canonical list.
 # Only the bare model slug is stored (no vendor prefix).
 _PRIORITY_PROCESSING_MODELS: frozenset[str] = frozenset({
+    "gpt-5.5",
+    "gpt-5.5-pro",
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.2",
