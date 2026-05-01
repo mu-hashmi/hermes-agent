@@ -390,6 +390,24 @@ class _CodexCompletionsAdapter:
         # Note: the Codex endpoint (chatgpt.com/backend-api/codex) does NOT
         # support max_output_tokens or temperature — omit to avoid 400 errors.
 
+        # Forward reasoning_effort and service_tier from extra_body when the
+        # backend is the OpenAI platform Responses API (api.openai.com/v1).
+        # The chatgpt.com Codex backend rejects these fields, so we only do it
+        # for the platform endpoint.
+        try:
+            _base_host = base_url_hostname(str(getattr(self._client, "base_url", "") or ""))
+        except Exception:
+            _base_host = ""
+        is_openai_platform = _base_host == "api.openai.com"
+        extra_body = kwargs.get("extra_body") or {}
+        if isinstance(extra_body, dict) and is_openai_platform:
+            effort = extra_body.get("reasoning_effort")
+            if isinstance(effort, str) and effort.strip():
+                resp_kwargs["reasoning"] = {"effort": effort.strip().lower()}
+            tier = extra_body.get("service_tier")
+            if isinstance(tier, str) and tier.strip():
+                resp_kwargs["service_tier"] = tier.strip().lower()
+
         # Tools support for auxiliary callers (e.g. skills_hub) that pass function schemas
         tools = kwargs.get("tools")
         if tools:
