@@ -638,16 +638,19 @@ async def vision_analyze_tool(
 ) -> str:
     """
     Analyze an image from a URL or local file path using vision AI.
-    
+
     This tool accepts either an HTTP/HTTPS URL or a local file path. For URLs,
     it downloads the image first. In both cases, the image is converted to base64
-    and processed using the configured vision backend (default: Haiku 4.5 via
-    Anthropic).
-    
+    and processed using the vision backend configured under
+    ``auxiliary.vision`` in ``~/.hermes/config.yaml``. Run ``hermes config show``
+    to see what is actually live; the default ships as Haiku 4.5 via Anthropic
+    but is commonly overridden to a stronger reasoning model (GPT-5.x, Claude
+    Opus, Gemini 3 Pro) for QA-style work.
+
     The user_prompt parameter is expected to be pre-formatted by the calling
     function (typically model_tools.py) to include both full description
     requests and specific questions.
-    
+
     Args:
         image_url (str): The URL or local file path of the image to analyze.
                          Accepts http://, https:// URLs or absolute/relative file paths.
@@ -655,20 +658,20 @@ async def vision_analyze_tool(
         model (str): The vision model to use. Omit to use the configured default.
         reasoning_effort (str): Optional 'low', 'medium', or 'high'. Passed through
                                 via extra_body.reasoning_effort so reasoning-capable
-                                backends (Opus 4.7, Gemini 3 Pro, GPT-5, etc.) spend
-                                more compute on complex images. Ignored on non-
-                                reasoning models (e.g. Haiku 4.5).
-    
+                                backends (GPT-5.x, Claude Opus 4.7, Gemini 3 Pro)
+                                spend more compute on complex images. Ignored on
+                                non-reasoning models (e.g. Haiku 4.5).
+
     Returns:
         str: JSON string containing the analysis results with the following structure:
              {
                  "success": bool,
                  "analysis": str (defaults to error message if None)
              }
-    
+
     Raises:
         Exception: If download fails, analysis fails, or API key is not set
-        
+
     Note:
         - For URLs, temporary images are stored under $HERMES_HOME/cache/vision/ and cleaned up
         - For local file paths, the file is used directly and NOT deleted
