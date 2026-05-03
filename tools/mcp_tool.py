@@ -1861,19 +1861,40 @@ _SESSION_EXPIRED_MARKERS: tuple = (
 def _is_session_expired_error(exc: BaseException) -> bool:
     """Return True if ``exc`` looks like an MCP transport session expiry.
 
-    Streamable HTTP MCP servers may garbage-collect server-side session
-    state while the OAuth token remains valid — idle TTL, server
-    restart, horizontal-scaling pod rotation, etc.  The SDK surfaces
-    this as a JSON-RPC error whose message contains phrases like
-    ``"Invalid or expired session"``.  This class of failure is
-    distinct from :func:`_is_auth_error`: re-running the OAuth refresh
-    flow would be pointless because the access token is fine.  What's
-    needed is a transport reconnect — tear down and rebuild the
-    ``streamablehttp_client`` + ``ClientSession`` pair, which is
-    exactly what ``MCPServerTask._reconnect_event`` triggers.
+    Two failure shapes are covered:
+
+    1. **Streamable HTTP server-side session GC.** Idle TTL, server
+       restart, horizontal-scaling pod rotation, etc. — the OAuth
+       token is fine, only the server-side session state is stale.
+       The SDK surfaces this as a JSON-RPC error whose message contains
+       phrases like ``"Invalid or expired session"``.
+    2. **Stdio transport stream death.** When the MCPServerTask's
+       background coroutine exits (subprocess crash, parent reload,
+       cancel scope unwound), the bidirectional ``MemoryObjectStream``
+       pair is closed locally. ``server.session`` is still a non-None
+       ``ClientSession`` reference but ``session.call_tool()`` raises
+       ``anyio.ClosedResourceError`` immediately. The exception's
+       ``str()`` is empty, so message-based markers can't catch it —
+       we have to detect it by type.
+
+    Either shape is distinct from :func:`_is_auth_error`: re-running
+    the OAuth refresh flow is pointless. What's needed is a transport
+    reconnect — exactly what ``MCPServerTask._reconnect_event``
+    triggers.
     """
     if isinstance(exc, InterruptedError):
         return False
+    # Type-based detection for stdio stream death (#: empty-message
+    # ClosedResourceError from anyio when the MCPServerTask coroutine
+    # exited but ``server.session`` still holds a stale reference).
+    try:
+        import anyio
+        if isinstance(exc, anyio.ClosedResourceError):
+            return True
+        if isinstance(exc, anyio.BrokenResourceError):
+            return True
+    except ImportError:
+        pass
     # Exception messages vary across SDK versions + server
     # implementations, so match on a small allow-list of stable
     # substrings rather than exception type.  Kept narrow to avoid
@@ -3298,6 +3319,15 @@ def shutdown_mcp_servers():
     """
     with _lock:
         servers_snapshot = list(_servers.values())
+
+    # Clear circuit-breaker state for ALL known servers, not just the
+    # ones we have live records for. Without this, a server that
+    # tripped the breaker before this shutdown (count >= threshold)
+    # would still short-circuit on its first call after a clean
+    # /reload-mcp because the count + opened_at survive across
+    # reconnects. The new connection deserves a fresh chance.
+    _server_error_counts.clear()
+    _server_breaker_opened_at.clear()
 
     # Fast path: nothing to shut down.
     if not servers_snapshot:
