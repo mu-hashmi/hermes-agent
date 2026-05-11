@@ -57,6 +57,8 @@ def _build_agent(tmp_path: Path):
     agent.platform = None
     agent.provider = "anthropic"
     agent._last_flushed_db_idx = 0
+    agent._session_init_model_config = {}
+    agent.tools = []
     agent.logs_dir = tmp_path
     agent.session_log_file = tmp_path / f"session_{old_id}.json"
 
