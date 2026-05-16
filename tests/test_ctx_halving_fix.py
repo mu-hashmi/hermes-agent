@@ -4,7 +4,7 @@ Background
 ----------
 When the API returns "max_tokens too large given prompt" (input is fine,
 but input_tokens + requested max_tokens > context_window), the old code
-incorrectly halved context_length via get_next_probe_tier().
+incorrectly reduced context_length via the now-removed probe-tier ladder.
 
 The fix introduces:
   * parse_available_output_tokens_from_error() — detects this specific
@@ -261,7 +261,6 @@ class TestContextNotHalvedOnOutputCapError:
         """On 'max_tokens too large' error, _ephemeral_max_output_tokens is set
         and compressor.context_length is left unchanged."""
         from agent.model_metadata import parse_available_output_tokens_from_error
-        from agent.model_metadata import get_next_probe_tier
 
         error_msg = (
             "max_tokens: 128000 > context_window: 200000 "
@@ -282,19 +281,14 @@ class TestContextNotHalvedOnOutputCapError:
         assert agent.context_compressor.context_length == old_ctx
         assert agent._ephemeral_max_output_tokens == 19_936
 
-    def test_prompt_too_long_still_triggers_probe_tier(self):
-        """Genuine prompt-too-long errors must still use get_next_probe_tier."""
+    def test_prompt_too_long_is_not_caught_by_output_cap_parser(self):
+        """Genuine prompt-too-long errors must not be detected as output-cap errors."""
         from agent.model_metadata import parse_available_output_tokens_from_error
-        from agent.model_metadata import get_next_probe_tier
 
         error_msg = "prompt is too long: 205000 tokens > 200000 maximum"
 
         available_out = parse_available_output_tokens_from_error(error_msg)
         assert available_out is None, "prompt-too-long must not be caught by output-cap parser"
-
-        # The old halving path is still used for this class of error
-        new_ctx = get_next_probe_tier(200_000)
-        assert new_ctx == 128_000
 
     def test_output_cap_error_safety_margin(self):
         """The ephemeral value includes a 64-token safety margin below available_out."""
