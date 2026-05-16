@@ -72,6 +72,8 @@ _HERMES_CORE_TOOLS = [
     "computer_use",
     # Chrome DevTools Protocol via browser-harness-js (gated on CLI presence)
     "browser_harness",
+    # macOS screenshots (gated to Darwin via check_fn)
+    "screen_list", "screenshot_display", "screenshot_window",
 ]
 
 
@@ -180,6 +182,12 @@ TOOLSETS = {
     "browser_harness": {
         "description": "Drive the user's live Chrome via the Chrome DevTools Protocol (browser-harness-js). Attaches to existing browser with real profile/cookies/extensions, unlike the headless 'browser' toolset.",
         "tools": ["browser_harness"],
+        "includes": []
+    },
+
+    "screenshot": {
+        "description": "macOS screenshots — capture specific windows or full displays, enumerate open windows. Use when the user wants the agent to see what's currently on their screen.",
+        "tools": ["screen_list", "screenshot_display", "screenshot_window"],
         "includes": []
     },
 
