@@ -70,6 +70,8 @@ _HERMES_CORE_TOOLS = [
     "kanban_unblock",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
+    # macOS screenshots (gated to Darwin via check_fn)
+    "screen_list", "screenshot_display", "screenshot_window",
 ]
 
 
@@ -174,7 +176,13 @@ TOOLSETS = {
         "tools": ["cronjob"],
         "includes": []
     },
-    
+
+    "screenshot": {
+        "description": "macOS screenshots — capture specific windows or full displays, enumerate open windows. Use when the user wants the agent to see what's currently on their screen.",
+        "tools": ["screen_list", "screenshot_display", "screenshot_window"],
+        "includes": []
+    },
+
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
         "tools": ["send_message"],
