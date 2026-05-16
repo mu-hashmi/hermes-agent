@@ -3108,7 +3108,22 @@ class HermesCLI:
             "session_total_tokens": 0,
             "session_api_calls": 0,
             "compressions": 0,
+            "reasoning_label": "default",
         }
+
+        # Reasoning effort label for the status bar.  Source of truth is
+        # ``self.reasoning_config`` — set by /reasoning, persisted in
+        # config.yaml's agent.reasoning_effort.  Three shapes:
+        #   None                                  -> model default (display "default")
+        #   {"enabled": False}                    -> /reasoning none (display "none")
+        #   {"enabled": True, "effort": <level>}  -> display the level
+        rc = getattr(self, "reasoning_config", None)
+        if rc is None:
+            snapshot["reasoning_label"] = "default"
+        elif rc.get("enabled") is False:
+            snapshot["reasoning_label"] = "none"
+        else:
+            snapshot["reasoning_label"] = rc.get("effort") or "default"
 
         if not agent:
             return snapshot
@@ -3324,6 +3339,54 @@ class HermesCLI:
         cont = " | Continuous" if self._voice_continuous else ""
         return [("class:voice-status", f" 🎤 Voice mode{tts}{cont}  —  {label} to record ")]
 
+    def _count_bg_agents(self) -> int:
+        """Count active tmux sessions belonging to this Hermes session.
+
+        Sessions are named hermes-bg-{session_id}-{timestamp} so each
+        Hermes instance only sees its own background agents.
+        """
+        try:
+            import subprocess
+            prefix = f"hermes-bg-{self.session_id}-"
+            result = subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True, text=True, timeout=1,
+            )
+            if result.returncode != 0:
+                return 0
+            return sum(1 for line in result.stdout.splitlines() if line.startswith(prefix))
+        except Exception:
+            return 0
+
+    def _get_cwd_and_git_branch(self) -> tuple:
+        """Return (short_cwd, git_branch_or_None) for status bar display.
+
+        Cached for 5 seconds to avoid spawning git on every render.
+        """
+        now = time.time()
+        cache = getattr(self, "_cwd_git_cache", None)
+        if cache and (now - cache[0]) < 5:
+            return cache[1], cache[2]
+
+        try:
+            cwd = os.getenv("TERMINAL_CWD", os.getcwd())
+            home = os.path.expanduser("~")
+            short_cwd = ("~" + cwd[len(home):]) if cwd.startswith(home) else cwd
+
+            import subprocess
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=1,
+                cwd=cwd,
+            )
+            branch = result.stdout.strip() if result.returncode == 0 else None
+        except Exception:
+            short_cwd = os.getenv("TERMINAL_CWD", "")
+            branch = None
+
+        self._cwd_git_cache = (now, short_cwd, branch)
+        return short_cwd, branch
+
     def _build_status_bar_text(self, width: Optional[int] = None) -> str:
         """Return a compact one-line session status string for the TUI footer."""
         try:
@@ -3358,7 +3421,7 @@ class HermesCLI:
                 context_label = "ctx --"
 
             compressions = snapshot.get("compressions", 0)
-            parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            parts = [f"⚕ {snapshot['model_short']}", snapshot["reasoning_label"], context_label, percent_label]
             if compressions:
                 parts.append(f"🗜️ {compressions}")
             parts.append(duration_label)
@@ -3428,9 +3491,23 @@ class HermesCLI:
 
                     bar_style = self._status_bar_context_style(percent)
                     compressions = snapshot.get("compressions", 0)
+
+                    # Working directory and git branch — right after model name
+                    short_cwd, git_branch = self._get_cwd_and_git_branch()
+                    cwd_frags = []
+                    if short_cwd:
+                        cwd_frags.append(("class:status-bar-dim", " │ "))
+                        cwd_frags.append(("class:status-bar", short_cwd))
+                        if git_branch:
+                            cwd_frags.append(("class:status-bar-dim", " ⎇ "))
+                            cwd_frags.append(("class:status-bar-strong", git_branch))
+
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
+                        ("class:status-bar-dim", " │ "),
+                        ("class:status-bar-dim", snapshot["reasoning_label"]),
+                        *cwd_frags,
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
                         ("class:status-bar-dim", " │ "),
@@ -3453,6 +3530,13 @@ class HermesCLI:
                     if yolo_active:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append(("class:status-bar-yolo", "⚠ YOLO"))
+
+                    # Show active background agent count (tmux hermes-bg-* sessions)
+                    bg_count = self._count_bg_agents()
+                    if bg_count > 0:
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append(("class:status-bar-strong", f"⚡{bg_count} bg"))
+
                     frags.append(("class:status-bar", " "))
 
             total_width = sum(self._status_bar_display_width(text) for _, text in frags)
@@ -9672,10 +9756,6 @@ class HermesCLI:
             self._stream_box_opened = False
         self._close_reasoning_box()
 
-        from agent.display import get_tool_emoji
-        emoji = get_tool_emoji(tool_name, default="⚡")
-        _cprint(f"  ┊ {emoji} preparing {tool_name}…")
-
     # ====================================================================
     # Tool progress callback (audio cues for voice mode)
     # ====================================================================
@@ -9749,10 +9829,9 @@ class HermesCLI:
         if event_type != "tool.started":
             return
         if function_name and not function_name.startswith("_"):
-            from agent.display import get_tool_emoji
+            from agent.display import get_tool_emoji, get_tool_preview_max_len
             emoji = get_tool_emoji(function_name)
             label = preview or function_name
-            from agent.display import get_tool_preview_max_len
             _pl = get_tool_preview_max_len()
             if _pl > 0 and len(label) > _pl:
                 label = label[:_pl - 3] + "..."
@@ -11526,13 +11605,13 @@ class HermesCLI:
                 spinner_widget,
                 spacer,
                 *self._get_extra_tui_widgets(),
-                status_bar,
                 input_rule_top,
                 image_bar,
                 input_area,
                 input_rule_bot,
                 voice_status_bar,
                 completions_menu,
+                status_bar,
             ] if item is not None
         ]
 
