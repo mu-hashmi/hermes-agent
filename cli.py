@@ -4593,6 +4593,19 @@ class HermesCLI:
                 except (ValueError, Exception) as e:
                     _cprint(f"  Could not apply pending title: {e}")
                     # Keep _pending_title so it can be retried after row creation succeeds
+
+            # Update the terminal tab title to reflect the current session.
+            try:
+                from agent.terminal_title import set_tab_title
+                existing_title = None
+                if self._session_db:
+                    sess = self._session_db.get_session(self.session_id)
+                    if sess:
+                        existing_title = sess.get("title")
+                set_tab_title(existing_title or "Hermes")
+            except Exception:
+                pass
+
             return True
         except Exception as e:
             ChatConsole().print(f"[bold red]Failed to initialize agent: {e}[/]")
@@ -7848,6 +7861,11 @@ class HermesCLI:
                             try:
                                 if self._session_db.set_session_title(self.session_id, new_title):
                                     _cprint(f"  Session title set: {new_title}")
+                                    try:
+                                        from agent.terminal_title import set_tab_title
+                                        set_tab_title(new_title)
+                                    except Exception:
+                                        pass
                                 else:
                                     _cprint("  Session not found in database.")
                             except ValueError as e:
@@ -7861,6 +7879,11 @@ class HermesCLI:
                             else:
                                 self._pending_title = new_title
                                 _cprint(f"  Session title queued: {new_title} (will be saved on first message)")
+                                try:
+                                    from agent.terminal_title import set_tab_title
+                                    set_tab_title(new_title)
+                                except Exception:
+                                    pass
                     else:
                         from hermes_state import format_session_db_unavailable
                         _cprint(f"  {format_session_db_unavailable()}")
@@ -10887,6 +10910,27 @@ class HermesCLI:
         # Add user message to history
         self.conversation_history.append({"role": "user", "content": message})
 
+        # Set tab title to a snippet of the first user message if no title exists
+        # yet.  Gets replaced by the auto-generated title after the first response
+        # completes, or by `/title` if the user sets one explicitly.
+        try:
+            user_msg_count = sum(
+                1 for m in self.conversation_history if m.get("role") == "user"
+            )
+            if user_msg_count == 1 and not self._pending_title:
+                existing_title = None
+                if self._session_db:
+                    sess = self._session_db.get_session(self.session_id)
+                    if sess:
+                        existing_title = sess.get("title")
+                if not existing_title and isinstance(message, str):
+                    snippet = message.strip().split("\n", 1)[0][:50]
+                    if snippet:
+                        from agent.terminal_title import set_tab_title
+                        set_tab_title(snippet)
+        except Exception:
+            pass
+
         ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
         print(flush=True)
         
@@ -11165,6 +11209,7 @@ class HermesCLI:
             if response and result and not result.get("failed") and not result.get("partial"):
                 try:
                     from agent.title_generator import maybe_auto_title
+                    from agent.terminal_title import set_tab_title
                     # Route title-generation failures through the agent's
                     # user-visible warning channel so a depleted auxiliary
                     # provider doesn't silently leave sessions untitled
@@ -11172,6 +11217,16 @@ class HermesCLI:
                     _title_failure_cb = getattr(
                         self.agent, "_emit_auxiliary_failure", None
                     ) if self.agent else None
+
+                    def _on_title_generated(new_title: str) -> None:
+                        # Fires from the auto-title background thread once the
+                        # LLM-generated title has been stored. Swap the tab
+                        # title from the first-message snippet to the real title.
+                        try:
+                            set_tab_title(new_title)
+                        except Exception:
+                            pass
+
                     maybe_auto_title(
                         self._session_db,
                         self.session_id,
@@ -11186,6 +11241,7 @@ class HermesCLI:
                             "api_key": self.api_key,
                             "api_mode": self.api_mode,
                         },
+                        title_callback=_on_title_generated,
                     )
                 except Exception:
                     pass
