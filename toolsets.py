@@ -70,6 +70,8 @@ _HERMES_CORE_TOOLS = [
     "kanban_unblock",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
+    # Chrome DevTools Protocol via browser-harness-js (gated on CLI presence)
+    "browser_harness",
 ]
 
 
@@ -174,7 +176,13 @@ TOOLSETS = {
         "tools": ["cronjob"],
         "includes": []
     },
-    
+
+    "browser_harness": {
+        "description": "Drive the user's live Chrome via the Chrome DevTools Protocol (browser-harness-js). Attaches to existing browser with real profile/cookies/extensions, unlike the headless 'browser' toolset.",
+        "tools": ["browser_harness"],
+        "includes": []
+    },
+
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
         "tools": ["send_message"],
