@@ -13443,12 +13443,26 @@ class HermesCLI:
         except Exception:
             pass
 
+        # Hermes used to also install a SIGWINCH-triggered "recovery" that
+        # wiped the terminal (\x1b[2J\x1b[3J) and replayed an ANSI-stripped
+        # 200-line deque to repaint context above the prompt (commit
+        # 76074d9ee, "fix(cli): recover classic CLI output after resize").
+        # In modern terminal emulators that preserve scrollback through
+        # SIGWINCH cleanly — Ghostty splits (cmd+D), window narrowing,
+        # sidebar toggles — the recovery does more harm than good: the
+        # visible result is a destructive screen-clear followed by a
+        # truncated grey replay with no Hermes panels/colors. The
+        # _output_screen_diff monkey-patch above already handles the actual
+        # ghost-status-bar reflow cleanly without the recovery, so we let
+        # prompt_toolkit's native _on_resize run alone. If status-bar
+        # reflow ever still leaves visible ghosts, /redraw or Ctrl+L still
+        # clears them on demand.
         _original_on_resize = app._on_resize
 
-        def _resize_clear_ghosts():
-            self._schedule_resize_recovery(app, _original_on_resize)
+        def _resize_passthrough():
+            _original_on_resize()
 
-        app._on_resize = _resize_clear_ghosts
+        app._on_resize = _resize_passthrough
 
         def spinner_loop():
             while not self._should_exit:
