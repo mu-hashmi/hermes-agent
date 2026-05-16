@@ -672,37 +672,50 @@ class _CodexCompletionsAdapter:
         # Note: the Codex endpoint (chatgpt.com/backend-api/codex) does NOT
         # support max_output_tokens or temperature — omit to avoid 400 errors.
 
-        # Translate extra_body.reasoning (chat.completions shape) into the
-        # Responses API's top-level reasoning + include fields.  Mirrors
-        # agent/transports/codex.py::build_kwargs() so auxiliary callers
-        # that configure reasoning via auxiliary.<task>.extra_body get the
-        # same behavior as the main agent's Codex transport.
+        # Translate reasoning settings for Responses API backends.
+        # - chatgpt.com/backend-api/codex expects chat.completions-style
+        #   extra_body.reasoning converted to Responses top-level reasoning.
+        # - api.openai.com/v1 expects reasoning_effort/service_tier from the
+        #   OpenAI platform configuration.
+        try:
+            _base_host = base_url_hostname(str(getattr(self._client, "base_url", "") or ""))
+        except Exception:
+            _base_host = ""
+        is_openai_platform = _base_host == "api.openai.com"
         extra_body = kwargs.get("extra_body") or {}
         if isinstance(extra_body, dict):
-            reasoning_cfg = extra_body.get("reasoning")
-            if isinstance(reasoning_cfg, dict):
-                if reasoning_cfg.get("enabled") is False:
-                    # Reasoning explicitly disabled — do not set reasoning
-                    # or include.  The Codex backend still thinks by
-                    # default, but we honor the caller's intent where the
-                    # API allows it.
-                    pass
-                else:
-                    # Truthy-only check mirrors agent/transports/codex.py
-                    # build_kwargs(): falsy values (None, "", 0) fall back
-                    # to the default rather than being forwarded to the
-                    # Codex backend, which rejects e.g. {"effort": null}
-                    # with a 400.
-                    effort = reasoning_cfg.get("effort") or "medium"
-                    # Codex backend rejects "minimal"; clamp to "low" to
-                    # match the main-agent Codex transport behavior.
-                    if effort == "minimal":
-                        effort = "low"
-                    resp_kwargs["reasoning"] = {
-                        "effort": effort,
-                        "summary": "auto",
-                    }
-                    resp_kwargs["include"] = ["reasoning.encrypted_content"]
+            if is_openai_platform:
+                effort = extra_body.get("reasoning_effort")
+                if isinstance(effort, str) and effort.strip():
+                    resp_kwargs["reasoning"] = {"effort": effort.strip().lower()}
+                tier = extra_body.get("service_tier")
+                if isinstance(tier, str) and tier.strip():
+                    resp_kwargs["service_tier"] = tier.strip().lower()
+            else:
+                reasoning_cfg = extra_body.get("reasoning")
+                if isinstance(reasoning_cfg, dict):
+                    if reasoning_cfg.get("enabled") is False:
+                        # Reasoning explicitly disabled — do not set reasoning
+                        # or include. The Codex backend still thinks by
+                        # default, but we honor the caller's intent where the
+                        # API allows it.
+                        pass
+                    else:
+                        # Truthy-only check mirrors agent/transports/codex.py
+                        # build_kwargs(): falsy values (None, "", 0) fall back
+                        # to the default rather than being forwarded to the
+                        # Codex backend, which rejects e.g. {"effort": null}
+                        # with a 400.
+                        effort = reasoning_cfg.get("effort") or "medium"
+                        # Codex backend rejects "minimal"; clamp to "low" to
+                        # match the main-agent Codex transport behavior.
+                        if effort == "minimal":
+                            effort = "low"
+                        resp_kwargs["reasoning"] = {
+                            "effort": effort,
+                            "summary": "auto",
+                        }
+                        resp_kwargs["include"] = ["reasoning.encrypted_content"]
 
         # Tools support for auxiliary callers (e.g. skills_hub) that pass function schemas
         tools = kwargs.get("tools")
@@ -972,6 +985,17 @@ class _AnthropicCompletionsAdapter:
             max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens") or 2000
         temperature = kwargs.get("temperature")
 
+        # Pull reasoning_effort out of extra_body and translate into the
+        # reasoning_config shape build_anthropic_kwargs understands. Without
+        # this, auxiliary callers (vision_analyze, web_extract, etc.) have no
+        # way to turn on extended thinking on reasoning-capable Claudes.
+        reasoning_config = None
+        extra_body = kwargs.get("extra_body") or {}
+        if isinstance(extra_body, dict):
+            effort = extra_body.get("reasoning_effort")
+            if isinstance(effort, str) and effort.strip():
+                reasoning_config = {"effort": effort.strip().lower()}
+
         normalized_tool_choice = None
         if isinstance(tool_choice, str):
             normalized_tool_choice = tool_choice
@@ -987,7 +1011,7 @@ class _AnthropicCompletionsAdapter:
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
-            reasoning_config=None,
+            reasoning_config=reasoning_config,
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
         )
