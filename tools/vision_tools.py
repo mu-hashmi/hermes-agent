@@ -794,6 +794,7 @@ async def vision_analyze_tool(
         # Local vision models (llama.cpp, ollama) can take well over 30s.
         vision_timeout = 120.0
         vision_temperature = 0.1
+        _vision_temperature_explicit = False
         try:
             from hermes_cli.config import cfg_get, load_config
             _cfg = load_config()
@@ -804,15 +805,31 @@ async def vision_analyze_tool(
             _vtemp = _vision_cfg.get("temperature")
             if _vtemp is not None:
                 vision_temperature = float(_vtemp)
+                _vision_temperature_explicit = True
         except Exception:
             pass
+        # Vision temperature handling — when the resolved vision model is a
+        # reasoning-enabled model (gpt-5.x with reasoning, Claude opus/sonnet
+        # with thinking, gemini-3-pro with thinking), the provider rejects any
+        # non-1 temperature with "temperature may only be set to 1 when
+        # thinking is enabled". The vision tool can't always predict the
+        # resolved model — auxiliary.vision.provider: auto can route to
+        # whatever the user's main session model is, and several common
+        # session models implicitly enable reasoning on the provider side.
+        #
+        # Policy: only send temperature when the user EXPLICITLY set
+        # auxiliary.vision.temperature in config.yaml. Otherwise omit it
+        # entirely and let the provider use its own default (1.0 for
+        # reasoning models, ~0.7-1.0 for non-reasoning). Vision QA quality
+        # is dominated by model strength, not temperature precision.
         call_kwargs = {
             "task": "vision",
             "messages": messages,
-            "temperature": vision_temperature,
             "max_tokens": 2000,
             "timeout": vision_timeout,
         }
+        if _vision_temperature_explicit:
+            call_kwargs["temperature"] = vision_temperature
         if model:
             call_kwargs["model"] = model
         if reasoning_effort:
@@ -1314,6 +1331,7 @@ async def video_analyze_tool(
 
         vision_timeout = 180.0
         vision_temperature = 0.1
+        _vision_temperature_explicit = False
         try:
             from hermes_cli.config import cfg_get, load_config
             _cfg = load_config()
@@ -1324,16 +1342,20 @@ async def video_analyze_tool(
             _vtemp = _vision_cfg.get("temperature")
             if _vtemp is not None:
                 vision_temperature = float(_vtemp)
+                _vision_temperature_explicit = True
         except Exception:
             pass
 
         call_kwargs = {
             "task": "vision",
             "messages": messages,
-            "temperature": vision_temperature,
             "max_tokens": 4000,
             "timeout": vision_timeout,
         }
+        # Skip temperature unless explicitly set in config — reasoning models
+        # reject any non-1 temperature. See note in the image path above.
+        if _vision_temperature_explicit:
+            call_kwargs["temperature"] = vision_temperature
         if model:
             call_kwargs["model"] = model
 
